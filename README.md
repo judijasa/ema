@@ -1,2 +1,2 @@
 # ema
-Package managr for MariaDB.
+Package manager for MariaDB.
