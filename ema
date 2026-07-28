@@ -21,6 +21,7 @@ show_help() {
     echo ""
     echo "Environment:"
     echo "  EMA_TARGET             Target section in etc/reuter.ini (default: local)"
+    echo "  DBUSER                 Default CLI client user for non-local targets (default: \$USER)"
 }
 
 show_version() {
@@ -38,7 +39,7 @@ _load_target() {
     local target="${EMA_TARGET:-local}"
     local reuter="etc/reuter.ini"
     if [[ ! -f "$reuter" ]]; then
-        echo "Error: $reuter not found — copy etc/reuter.ini from the ema repo and fill in your values" >&2
+        echo "Error: $reuter not found — copy etc/reuter.ini.template and fill in your values" >&2
         exit 1
     fi
     local vars
@@ -91,7 +92,13 @@ _cmd_mariadb() {
     _assert_repo_root
     _load_target
     _mariadb_args
-    exec "$DBMS" "${_MARIADB_ARGS[@]}" "$@"
+    local _db_user
+    if [[ "${EMA_TARGET:-local}" == "local" ]]; then
+        _db_user="root"
+    else
+        _db_user="${DBUSER:-$USER}"
+    fi
+    exec "$DBMS" -u "$_db_user" "${_MARIADB_ARGS[@]}" "$@"
 }
 
 _cmd_init_db() {
