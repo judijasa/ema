@@ -1,0 +1,215 @@
+#!/bin/bash
+
+# When installed via nix, EMA_LIB is set by makeWrapper to the share directory.
+# When run directly from the repo, fall back to the adjacent src/ directory.
+_EMA_LIB="${EMA_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/src}"
+
+PROGRAM_NAME="ema"
+
+show_help() {
+    echo "Usage: $PROGRAM_NAME <command> [arguments]"
+    echo ""
+    echo "Available commands:"
+    echo "  schema <name>                 Create a new schema package in pkg/"
+    echo "  mariadb [args...]             Open a MariaDB shell against the active target"
+    echo "  init db <name>                Create database, users, and grants (reads srv/<name>.sql)"
+    echo "  init tables <root-pkg>        Apply all schema packages in topological order"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help             Show this help message and exit"
+    echo "  -v, --version          Show program version"
+    echo ""
+    echo "Environment:"
+    echo "  EMA_TARGET             Target section in etc/reuter.ini (default: local)"
+}
+
+show_version() {
+    echo "$PROGRAM_NAME version 1.0.0"
+}
+
+_assert_repo_root() {
+    if [[ ! -d "pkg" ]]; then
+        echo "Error: pkg/ not found — run ema from your project root" >&2
+        exit 1
+    fi
+}
+
+_load_target() {
+    local target="${EMA_TARGET:-local}"
+    local reuter="etc/reuter.ini"
+    if [[ ! -f "$reuter" ]]; then
+        echo "Error: $reuter not found — copy etc/reuter.ini from the ema repo and fill in your values" >&2
+        exit 1
+    fi
+    local vars
+    vars=$(php -r "
+        \$cnf = parse_ini_file('${reuter}', true);
+        if (!\$cnf || !isset(\$cnf['${target}'])) {
+            fwrite(STDERR, \"Error: target '${target}' not found in ${reuter}\n\");
+            exit(1);
+        }
+        foreach (\$cnf['${target}'] as \$k => \$v)
+            echo \$k . '=' . escapeshellarg(\$v) . PHP_EOL;
+    ") || exit 1
+    eval "$vars"
+}
+
+_mariadb_args() {
+    if [[ -n "${MYSQL_UNIX_PORT:-}" ]]; then
+        _MARIADB_ARGS=("--socket=$MYSQL_UNIX_PORT")
+    else
+        _MARIADB_ARGS=("-h" "$SERVER")
+        [[ -n "${PORT:-}" ]] && _MARIADB_ARGS+=("-P" "$PORT")
+    fi
+}
+
+schema() {
+    if [[ -z "$1" ]]; then
+        echo "Error: must provide a name for the schema" >&2
+        exit 1
+    fi
+    _assert_repo_root
+    local prefix="$1"
+    if ls -d "pkg/${prefix}"-* 1>/dev/null 2>&1; then
+        echo "Error: Schema with prefix '$prefix' already exists in pkg/." >&2
+        return 1
+    fi
+    local random_suffix
+    random_suffix=$(tr -dc 'A-Z0-9' < /dev/urandom | fold -w 16 | head -n 1)
+    local directory_name="${prefix}-${random_suffix}"
+    mkdir -p "pkg/${directory_name}"
+    touch "pkg/${directory_name}/upgrade.sql"
+    cat <<EOD > "pkg/${directory_name}/default.php"
+<?php
+\$dependencies = array();
+?>
+EOD
+    echo "Directory created: pkg/${directory_name}"
+}
+
+_cmd_mariadb() {
+    _assert_repo_root
+    _load_target
+    _mariadb_args
+    exec "$DBMS" "${_MARIADB_ARGS[@]}" "$@"
+}
+
+_cmd_init_db() {
+    local name="$1"
+    if [[ -z "$name" ]]; then
+        echo "Error: must provide a database name (e.g., ema init db mydb)" >&2
+        exit 1
+    fi
+    _assert_repo_root
+    if [[ $EUID -eq 0 ]]; then
+        echo "Error: execute without sudo." >&2
+        exit 1
+    fi
+    _load_target
+    _mariadb_args
+    local srv_file="srv/${name}.sql"
+    if [[ ! -f "$srv_file" ]]; then
+        echo "Error: $srv_file not found" >&2
+        exit 1
+    fi
+    local workdir
+    workdir=$(mktemp -d /tmp/db_schemas_XXXXXX)
+    local pseudo_sql="${workdir}/pseudo_query.sql"
+    local sql="${workdir}/query.sql"
+    cat "$srv_file" >> "$pseudo_sql"
+    sed "s/{{dbname}}/${name}/g; s/{{servername}}/${SERVER}/g; s/{{admin_password}}/${ADMIN_PASSWORD}/g; s/{{reader_password}}/${READER_PASSWORD}/g;" \
+        "$pseudo_sql" > "$sql"
+    "$DBMS" -u root "${_MARIADB_ARGS[@]}" < "$sql" 2>/dev/null || \
+        sudo env PATH="$PATH" MYSQL_UNIX_PORT="$MYSQL_UNIX_PORT" "$DBMS" -u root "${_MARIADB_ARGS[@]}" < "$sql"
+    rm -r "$workdir"
+    "$DBMS" -u root "${_MARIADB_ARGS[@]}" "$name" 2>/dev/null || \
+        sudo env PATH="$PATH" MYSQL_UNIX_PORT="$MYSQL_UNIX_PORT" "$DBMS" -u root "${_MARIADB_ARGS[@]}" "$name"
+}
+
+_cmd_init_tables() {
+    local root_pkg="$1"
+    if [[ -z "$root_pkg" ]]; then
+        echo "Error: must provide a root package (e.g., ema init tables mypkg-HASH)" >&2
+        exit 1
+    fi
+    _assert_repo_root
+    if [[ $EUID -eq 0 ]]; then
+        echo "Error: execute without sudo." >&2
+        exit 1
+    fi
+    _load_target
+    _mariadb_args
+    local dbname="${DBNAME:-}"
+    if [[ -z "$dbname" ]]; then
+        echo "Error: DBNAME not set in [${EMA_TARGET:-local}] section of etc/reuter.ini" >&2
+        exit 1
+    fi
+    local schemas_json
+    schemas_json=$(php -r "
+        require '${_EMA_LIB}/sort_schemas.php';
+        echo json_encode(build_dependency_graph('${root_pkg}')->topological_sort());
+    ") || exit 1
+    local schemas_array
+    mapfile -t schemas_array < <(echo "$schemas_json" | jq -r '.[]')
+    local workdir
+    workdir=$(mktemp -d /tmp/table_schemas_XXXXXX)
+    local pseudo_sql="${workdir}/pseudo_query.sql"
+    local sql="${workdir}/query.sql"
+    for schema in "${schemas_array[@]}"; do
+        cat "pkg/$schema/upgrade.sql" >> "$pseudo_sql"
+        echo "" >> "$pseudo_sql"
+    done
+    { echo "SET FOREIGN_KEY_CHECKS=0;"; \
+      sed "s/{{dbname}}/${dbname}/g; s/{{servername}}/${SERVER}/g;" "$pseudo_sql"; \
+      echo "SET FOREIGN_KEY_CHECKS=1;"; } > "$sql"
+    "$DBMS" -u root "${_MARIADB_ARGS[@]}" "$dbname" < "$sql" 2>/dev/null || \
+        sudo env PATH="$PATH" MYSQL_UNIX_PORT="$MYSQL_UNIX_PORT" "$DBMS" -u root "${_MARIADB_ARGS[@]}" "$dbname" < "$sql"
+    rm -r "$workdir"
+    "$DBMS" -u root "${_MARIADB_ARGS[@]}" "$dbname" -e "SHOW TABLES;" 2>/dev/null || \
+        sudo env PATH="$PATH" MYSQL_UNIX_PORT="$MYSQL_UNIX_PORT" "$DBMS" -u root "${_MARIADB_ARGS[@]}" "$dbname" -e "SHOW TABLES;"
+}
+
+if [[ $# -eq 0 ]]; then
+    show_help
+    exit 0
+fi
+
+case "$1" in
+    schema)
+        shift
+        schema "$@"
+        ;;
+    mariadb)
+        shift
+        _cmd_mariadb "$@"
+        ;;
+    init)
+        shift
+        case "$1" in
+            db)
+                shift
+                _cmd_init_db "$@"
+                ;;
+            tables)
+                shift
+                _cmd_init_tables "$@"
+                ;;
+            *)
+                echo "Error: Unknown init subcommand: ${1:-<missing>}" >&2
+                show_help
+                exit 1
+                ;;
+        esac
+        ;;
+    -h|--help)
+        show_help
+        ;;
+    -v|--version)
+        show_version
+        ;;
+    *)
+        echo "Error: Unknown command or option: $1" >&2
+        show_help
+        exit 1
+        ;;
+esac
