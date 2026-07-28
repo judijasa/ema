@@ -140,6 +140,10 @@ _cmd_init_tables() {
         exit 1
     fi
     _assert_repo_root
+    if [[ ! -d "pkg/$root_pkg" ]]; then
+        echo "Error: pkg/$root_pkg not found" >&2
+        exit 1
+    fi
     if [[ $EUID -eq 0 ]]; then
         echo "Error: execute without sudo." >&2
         exit 1
