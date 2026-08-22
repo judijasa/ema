@@ -35,8 +35,27 @@ _assert_repo_root() {
     fi
 }
 
+- _load_target resolves the section for a database name:
+#   local: [local:<dbname>] if present, else [local]
+#   other: [<dbname>], or [${EMA_TARGET:-local}] when no dbname is given
+_resolve_target() {
+    local dbname="${1:-}"
+    if [ "${EMA_TARGET:-local}" = "local" ]; then
+        if [ -n "$dbname" ] && php -r "
+            \$cnf = parse_ini_file('etc/reuter.ini', true);
+            exit(isset(\$cnf['local:' . \$argv[1]]) ? 0 : 1);
+        " "$dbname" 2>/dev/null; then
+            echo "local:$dbname"
+        else
+            echo "local"
+        fi
+    else
+        echo "${dbname:-${EMA_TARGET:-local}}"
+    fi
+}
+
 _load_target() {
-    local target="${EMA_TARGET:-local}"
+    local target="$1"
     local reuter="etc/reuter.ini"
     if [[ ! -f "$reuter" ]]; then
         echo "Error: $reuter not found — copy etc/reuter.ini.template and fill in your values" >&2
@@ -90,15 +109,21 @@ EOD
 
 _cmd_mariadb() {
     _assert_repo_root
-    _load_target
+    local dbname="" _args=("$@")
+    if [ "${#_args[@]}" -gt 0 ] && [[ "${_args[0]}" != -* ]]; then
+        dbname="${_args[0]}"
+    fi
+    local target
+    target="$(_resolve_target "$dbname")"
+    _load_target "$target"
     _mariadb_args
     local _db_user
-    if [[ "${EMA_TARGET:-local}" == "local" ]]; then
+    if [ "$target" = "local" ] || [[ "$target" == local:* ]]; then
         _db_user="root"
     else
         _db_user="${DBUSER:-$USER}"
     fi
-    exec "$DBMS" -u "$_db_user" "${_MARIADB_ARGS[@]}" "$@"
+    exec "$DBMS" -u "$_db_user" "${_MARIADB_ARGS[@]}" "${_args[@]}"
 }
 
 _cmd_init_db() {
@@ -112,7 +137,9 @@ _cmd_init_db() {
         echo "Error: execute without sudo." >&2
         exit 1
     fi
-    _load_target
+    local target
+    target="$(_resolve_target "$name")"
+    _load_target "$target"
     _mariadb_args
     local srv_file="srv/${name}.sql"
     if [[ ! -f "$srv_file" ]]; then
@@ -148,7 +175,7 @@ _cmd_init_tables() {
         echo "Error: execute without sudo." >&2
         exit 1
     fi
-    _load_target
+    _load_target "$(_resolve_target)"
     _mariadb_args
     local dbname="${DBNAME:-}"
     if [[ -z "$dbname" ]]; then
