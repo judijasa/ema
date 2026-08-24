@@ -71,6 +71,10 @@ _load_target() {
         foreach (\$cnf['${target}'] as \$k => \$v)
             echo \$k . '=' . escapeshellarg(\$v) . PHP_EOL;
     ") || exit 1
+    # The section is authoritative: clear any ambient connection vars first so
+    # an exported value (e.g. MYSQL_UNIX_PORT from the dev shell) cannot leak
+    # into a section that does not define it.
+    unset SERVER PORT DBNAME DBMS ADMIN_PASSWORD READER_PASSWORD MYSQL_UNIX_PORT
     eval "$vars"
 }
 
