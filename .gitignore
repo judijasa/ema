@@ -1,3 +1,4 @@
 # Generated / machine-local files.
 var/
 .env
+/etc/reuter.ini

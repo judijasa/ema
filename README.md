@@ -9,7 +9,7 @@ its `[<dbname>]` section (the section header is the database name):
 - `EMA_MODE=dev` (default) reads `var/reuter.local.ini` — the dev
   sandbox, generated and updated by `ema init db <name>`.
 - any other `EMA_MODE` (e.g. `prod`) reads `REUTER_INI` (fallback
-  `etc/reuter.ini`, a committed example of the prod shape).
+  `etc/reuter.ini`; copy `etc/reuter.ini.template` to create it).
 
 `EMA_MODE` is also the mode switch for `ema init db` / `ema init tables`,
 not just a file selector. `dev` mode creates/updates `var/reuter.local.ini`
