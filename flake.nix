@@ -70,7 +70,7 @@
               trap "echo 'Stopping local MariaDB server...'; kill $MARIADB_PID; wait $MARIADB_PID 2>/dev/null" EXIT
             fi
 
-            export EMA_TARGET="local"
+            export EMA_MODE="dev"
 
             CYAN='\033[0;36m'
             GREEN='\033[0;32m'
