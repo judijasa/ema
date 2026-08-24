@@ -191,7 +191,10 @@ _cmd_init_db() {
         exit 1
     fi
     _assert_repo_root
-    if [[ $EUID -eq 0 ]]; then
+    # Root is allowed only in prod mode (issue-9 model: SSH to the DB host as
+    # root, root/unix_socket auth over the local socket). In local mode the
+    # sandbox (var/) must stay user-owned, so root is refused.
+    if [[ $EUID -eq 0 ]] && [ "${EMA_TARGET:-local}" = "local" ]; then
         echo "Error: execute without sudo." >&2
         exit 1
     fi
@@ -214,7 +217,9 @@ _cmd_init_tables() {
         echo "Error: pkg/$root_pkg not found" >&2
         exit 1
     fi
-    if [[ $EUID -eq 0 ]]; then
+    # Root is allowed only in prod mode (same issue-9 model as init db);
+    # local mode refuses root to keep the dev sandbox user-owned.
+    if [[ $EUID -eq 0 ]] && [ "${EMA_TARGET:-local}" = "local" ]; then
         echo "Error: execute without sudo." >&2
         exit 1
     fi
