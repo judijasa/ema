@@ -1,7 +1,6 @@
 # reuter.ini section model — redesign tracking
 
 Date: 2026-08-22
-Repos involved: ema (CLI tool), php_daas_framework (framework), simox (consumer)
 
 ## Purpose
 
@@ -22,14 +21,14 @@ issue 9 (depends on 7 and the issue 3 branch rule), then issue 8, then issue 6
 
 | # | Issue | Status |
 |---|-------|--------|
-| 1 | Database.php must not reference EMA_TARGET (framework must be agnostic to ema) | Resolution agreed; flag mechanism open |
+| 1 | Consumer Database.php must not reference EMA_TARGET (must be agnostic to ema) | Resolution agreed; flag mechanism open |
 | 2 | Remove local references from etc/reuter.ini; local connectivity lives in var/reuter.local.ini | Design agreed; not implemented |
 | 3 | reuter.ini section logic is inconsistent: `[local]`, `[local:<dbname>]`, bare `[<dbname>]` mixed, with default fallbacks | Direction agreed; not implemented |
 | 4 | ema init db / init tables hardcode `-u root` even for non-local targets | Clarified (root over TCP fails); no code change needed for server-side path |
 | 5 | init tables has no dbname argument (only consumer of the section DBNAME key) | Open; part of the issue 1/2/3 redesign |
 | 6 | ema error message references etc/reuter.ini.template, which the ema repo does not ship | Cosmetic; open |
 | 7 | **Prod .env does not carry MYSQL_UNIX_PORT (PRIORITY)** | Decided: option B (section key); implemented (ema + gen-reuter + gen-env) |
-| 8 | srv/*.sql grants users to `'{{servername}}'` (host-pinned) | Decided: per-host grants, manual for now; task in php_daas_framework doc/todo.txt |
+| 8 | srv/*.sql grants users to `'{{servername}}'` (host-pinned) | Decided: per-host grants, manual for now |
 | 9 | Prod database creation path is undefined (no repo applies srv/*.sql in prod) | Model agreed; ema root guard fixed (2026-08-24); flow ready to exercise — needs real machines.ini [prod] + firewall |
 
 ## Status quo (what we are replacing)
@@ -40,12 +39,12 @@ Section resolution rules, duplicated in two consumers:
   - EMA_TARGET=local (default): use `[local:<dbname>]` if present, else fall
     back to `[local]`.
   - any other EMA_TARGET: use `<dbname>` if given, else EMA_TARGET itself.
-- framework `src/Connectivity/Database.php` `loadConfig()` (L33-43): identical
+- consumers' `src/Connectivity/Database.php` `loadConfig()` (L33-43): identical
   rules — `getenv('EMA_TARGET') ?: 'local'`, then `[local:<dbname>]` or
   `[local]`, else `[<dbname>]`.
 
 The section name is the lookup key (dbname -> connection). The DBNAME key
-inside sections is vestigial in the framework (buildDsn uses the method
+inside sections is vestigial (buildDsn uses the method
 argument dbname); only ema `init tables` reads it.
 
 ## Issue 1 — Database.php agnostic to ema
@@ -57,7 +56,7 @@ argument in **every** file — section selection is `$target = $dbname` with no
 `$target = $dbname`. (The `REUTER_LOCAL` flag below selects the **file**, not
 the section.)
 
-Current coupling (framework src/Connectivity/Database.php):
+Current coupling (consumers' src/Connectivity/Database.php):
 
     $env = getenv('EMA_TARGET') ?: 'local';
     if ($env === 'local') {
@@ -98,15 +97,14 @@ Why it is safe:
 - prod never reads it: prod .env sets EMA_TARGET=prod and
   REUTER_INI=/etc/<app>/reuter.ini (outside the repo);
 - /var/ is already git-ignored (credentials stay machine-local);
-- matches the rule in simox doc/2026-08-20-mariadb-instance-per-project.md:
-  reuter.ini stays pure connectivity and must not carry infrastructure
+- reuter.ini stays pure connectivity and must not carry infrastructure
   identity;
 - one MariaDB instance per project (same doc) makes the `[local:<dbname>]`
   per-db override obsolete.
 
 Touch points (when implemented):
 
-- [ ] framework Database.php — loadConfig(): drop the env branch (issue 1).
+- [ ] consumers' Database.php — loadConfig(): drop the env branch (issue 1).
 - [ ] ema `_resolve_target` / `_load_target` — same branching; error loudly
       when the file/section is missing (no fallback) (issue 3).
 - [ ] ema `_cmd_init_db` — explicit-mode branches (see issue 3): local mode
@@ -140,7 +138,7 @@ Fix: the branch is a property of the machine's mode, not of section absence:
   machines.ini roster before databases exist, so a missing section on prod is
   always a misconfiguration.
 - **Local mode** (dev machine only: `EMA_TARGET=local`, ema's own machine-mode
-  signal — not the framework's `REUTER_LOCAL` file flag from issue 1, which ema
+  signal — not the consumers' `REUTER_LOCAL` file flag from issue 1, which ema
   does not read): missing section -> create the db in the sandbox and append
   `[<name>]` to var/reuter.local.ini (issue 2).
 
@@ -180,14 +178,13 @@ key is dropped entirely (issue 3).
 
 ema `_load_target` error message (L61) tells the user to copy
 etc/reuter.ini.template, but the ema repo ships etc/reuter.ini itself as a
-committed example and no .template. Consumer repos (framework, simox) do have
+committed example and no .template. Consumer repos do have
 etc/reuter.ini.template. Cosmetic fix pending.
 
 ## Issue 7 — prod .env does not carry MYSQL_UNIX_PORT (PRIORITY)
 
 Problem: the prod `.env` no longer carries `MYSQL_UNIX_PORT` — the
-multi-server-deploy change dropped the `MYSQL_*` keys (TCP everywhere; see
-php_daas_framework/doc/plans/2026-08-22-multi-server-deploy.md). ema reaches the
+multi-server-deploy change dropped the `MYSQL_*` keys (TCP everywhere). ema reaches the
 instance over the socket only when `MYSQL_UNIX_PORT` is set; otherwise it
 falls back to TCP (`-h SERVER -P PORT`) and root over TCP fails (prod root =
 unix_socket auth). So "ssh to the DB host and `ema init db <name>`" cannot
@@ -213,15 +210,13 @@ Implemented on the ema side (2026-08-24):
   `MYSQL_UNIX_PORT` (e.g. the dev shell's) cannot leak into a TCP section.
 - `etc/reuter.ini` prod example now carries `MYSQL_UNIX_PORT`, mirroring the
   `[local]` example (parallel `reuter.ini` / `reuter.local.ini` shapes).
-- `gen-reuter` (php_daas_framework) writes
+- `gen-reuter` (consumer) writes
   `MYSQL_UNIX_PORT=$DEPLOY_DB_BASE/mysql.sock` into each prod `[<dbname>]`
   section. Also: `_load_target` still hardcodes `etc/reuter.ini` and ignores
   `REUTER_INI` — the prod DB-host flow needs that fixed (issue 2/3).
 
-The env-generation refactor (env.prod -> deploy.conf) is a framework concern
-and is tracked separately in
-php_daas_framework/doc/plans/2026-08-24-env-prod-merge-into-deploy-conf.md — not in
-this doc.
+The env-generation refactor (env.prod -> deploy.conf) is a consumer-side
+concern and is tracked separately — not in this doc.
 
 Unblocks issue 9.
 
@@ -237,7 +232,7 @@ better mechanism comes later.
 
 - The developer's own db user/host (e.g. `'juan'@'juan-workstation'`) must be
   granted access to the prod databases by hand.
-- Tracked as a task in php_daas_framework doc/todo.txt.
+- Tracked as a task in the consumer repos.
 - Future mechanism (idea, not started): generate the grants automatically
   from etc/machines.ini — `[dev]` already maps workstation hostname -> DBUSER,
   and `[prod]` maps server -> databases, so the data for automatic per-host
@@ -254,7 +249,7 @@ datadir, my.cnf, systemd unit, daemon start) — never databases/users.
 
 Decided model: SSH to the DB host as root and run `ema init db <name>` via
 the local socket (root/unix_socket auth). ema already ships to the server
-(framework `packages.ema`; simox pulls it). The `[<name>]` section already
+(consumers pull `packages.ema`). The `[<name>]` section already
 exists in /etc/<app>/reuter.ini (gen-reuter writes it regardless of whether
 the database exists).
 
@@ -279,7 +274,7 @@ guard, root+local still refuses, normal user unchanged.
 
 Remaining (operational, not code): fill the real ZeroTier IPs into
 `etc/machines.ini [prod]` and set `DEPLOY_DB_BIND` + firewall for the DB
-port (already tracked in simox doc/todo.txt), then exercise
+port (an open operational task), then exercise
 `ssh root@<db-host> 'cd <deploy-dir> && ema init db <name>'`.
 
 ## Fixed facts for future sessions
@@ -289,12 +284,12 @@ port (already tracked in simox doc/todo.txt), then exercise
   `[<dbname>]` sections generated by gen-reuter from etc/machines.ini +
   etc/deploy.conf; local MariaDB instance under var/mariadb; .env generated
   by init-local-env.sh (dev) / gen-env (prod).
-- .gitignore (framework + simox): /var/, /etc/reuter.ini, /etc/machines.ini,
+- .gitignore (consumer repos): /var/, /etc/reuter.ini, /etc/machines.ini,
   .env.
 - prod instance layout (provision.sh): `$DEPLOY_DB_BASE/{data,mysql.sock,
   mysql.pid}` + `/etc/<instance>/my.cnf` + `mariadb@<instance>` systemd unit;
   daemon binds the host's ZeroTier IP on DEPLOY_DB_PORT; prod root =
   unix_socket auth; TCP only (socket-only mode removed).
-- Original reuter vision (simox doc/2026-07-10-db-routing.md): one file per
+- Original reuter vision: one file per
   target at src/reuter/{name}.sh — the INI-with-sections model is the
   evolution of that.

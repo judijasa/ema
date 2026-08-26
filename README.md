@@ -36,7 +36,7 @@ just whatever `SERVER` resolves to).
 ## Standalone template usage
 
 This repo is dual-role. It is a **tool consumed** by other projects —
-`php_daas_framework` pins `ema.packages.${system}.default`, which now provides
+consumers pin `ema.packages.${system}.default`, which now provides
 both the `ema` CLI and `init-cluster.sh` (the isolated MariaDB dev-init) on
 PATH — and it is also a **standalone, forkable template** that behaves like
 its own consumer: `make dev-init` and the `ema init db` / `ema init tables`
@@ -100,6 +100,6 @@ The nix package (`packages.default`) ships two reusable artifacts on PATH:
 | `init-cluster.sh` | the isolated MariaDB dev-init (`mariadb-install-db` + start `mysqld`), fully parameterized (data-dir/pid-file/socket) |
 
 Consumers call `init-cluster.sh` from their own `make dev-init` with their
-own paths (see `php_daas_framework` / `simox`), instead of keeping a
+own paths, instead of keeping a
 duplicate copy. Everything else (`.env` generation, composer, git-hooks) is
 consumer policy and stays in the consumer.
