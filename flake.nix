@@ -41,9 +41,12 @@
             chmod +x $out/bin/.ema-unwrapped
             cp bin/dev/init-cluster.sh $out/bin/init-cluster.sh
             chmod +x $out/bin/init-cluster.sh
+            # Bundle jq: `ema init tables` parses schema JSON with jq, so the
+            # wrapped CLI must carry it on PATH (consumers no longer ship it).
             makeWrapper $out/bin/.ema-unwrapped $out/bin/ema \
               --set EMA_LIB "$out/share/ema" \
-              --suffix PATH : ${phpPkg}/bin
+              --suffix PATH : ${phpPkg}/bin \
+              --suffix PATH : ${jqPkg}/bin
           '';
         };
 
