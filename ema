@@ -6,23 +6,45 @@ _EMA_LIB="${EMA_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/src}"
 
 PROGRAM_NAME="ema"
 
+# Parse state, populated by _parse_flags (one command invocation at a time).
+declare -a _POS_ARGS=()
+declare -a _FLAGS=()
+declare -A _OPTIONS=()
+
 show_help() {
-    echo "Usage: $PROGRAM_NAME <command> [arguments]"
-    echo ""
-    echo "Available commands:"
-    echo "  schema <name>                 Create a new schema package in pkg/"
-    echo "  mariadb <db> [args...]        Open a MariaDB shell against a database's section"
-    echo "  init db <name>                Create database, users, and grants (reads srv/<name>.sql)"
-    echo "  init tables <root-pkg> <db>   Apply all schema packages in topological order"
-    echo ""
-    echo "Options:"
-    echo "  -h, --help             Show this help message and exit"
-    echo "  -v, --version          Show program version"
-    echo ""
-    echo "Environment:"
-    echo "  EMA_MODE               Machine mode: dev (local sandbox) or prod (default: dev)"
-    echo "  REUTER_INI             Prod reuter.ini path (used when EMA_MODE is not dev)"
-    echo "  DBUSER                 Default CLI client user for non-local targets (default: \$USER)"
+    cat <<HELP
+Usage: $PROGRAM_NAME <command> [arguments]
+
+Database lifecycle & shell:
+  mariadb <db> [args...]      Open a MariaDB shell against a database's section
+  start                       Start the dev sandbox server (var/mariadb)
+  stop                        Stop the dev sandbox server (var/mariadb)
+  restart                     Restart the dev sandbox server (var/mariadb)
+  status                      List sections/sandboxes: up/down + port + age
+  drop <db>                   Drop a database (sandbox: confirmed; prod: --force)
+  gc                          Remove stopped sandbox databases under var/mariadb
+
+Schema packages:
+  schema <name>               Create a new schema package in pkg/
+  database <name>             Create srv/<name>.sql stub + [<name>] section
+  init db <name>              Create database, users, and grants (reads srv/<name>.sql)
+  init tables <root-pkg> <db> Apply all schema packages in topological order
+  inspect <root-pkg>          Show the schema dependency graph
+  deps <root-pkg>             List schema packages in topological order
+
+Options:
+  -h, --help             Show this help message and exit
+  -v, --version          Show program version
+
+Run '$PROGRAM_NAME <command> --help' for per-command help.
+
+Environment:
+  EMA_MODE               Machine mode: dev (local sandbox) or prod (default: dev)
+  REUTER_INI             Prod reuter.ini path (used when EMA_MODE is not dev)
+  DBUSER                 Default CLI client user for non-local targets (default: \$USER)
+  EMA_FORCE/EMA_QUIET/EMA_VERBOSE/EMA_NO_SHELL
+                         Env fallbacks for the -f/-q/-v/-n flags
+HELP
 }
 
 show_version() {
@@ -86,9 +108,242 @@ _mariadb_args() {
     fi
 }
 
-schema() {
+# --- flag/option parsing (schematic-style, in bash) -------------------------
+# _parse_flags <flags-spec> <options-spec> <args...>
+#   flags-spec/options-spec: space-separated names (-f --force -q --quiet).
+#   Bundled shorts (-nf) are split. Populates _POS_ARGS/_FLAGS/_OPTIONS.
+_parse_flags() {
+    local flags_spec="$1" options_spec="$2"
+    shift 2
+    _POS_ARGS=()
+    _FLAGS=()
+    _OPTIONS=()
+    while [[ $# -gt 0 ]]; do
+        local arg="$1"; shift
+        if [[ "$arg" == "--" ]]; then
+            _POS_ARGS+=("$@")
+            break
+        elif [[ "$arg" != -* ]]; then
+            _POS_ARGS+=("$arg")
+        elif _contains "$arg" $flags_spec; then
+            _FLAGS+=("$arg")
+        elif _contains "$arg" $options_spec; then
+            if [[ $# -eq 0 ]]; then
+                echo "Error: expected value for $arg" >&2
+                exit 1
+            fi
+            _OPTIONS["$arg"]="$1"; shift
+        elif [[ "$arg" =~ ^-[a-zA-Z0-9]{2,36}$ ]]; then
+            # split up bundled short flags: -abc -> -a -b -c
+            local i
+            for (( i=1; i<${#arg}; i++ )); do
+                set -- "-${arg:$i:1}" "$@"
+            done
+        else
+            echo "Error: unexpected arg: $arg" >&2
+            exit 1
+        fi
+    done
+}
+
+_contains() {
+    local needle="$1"; shift
+    local x
+    for x in "$@"; do
+        [[ "$x" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+_env_bool() {
+    case "${1,,}" in
+        1|yes|true|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# _get_flag <names...> — echo "yes"/"no". Short/long names check the parsed
+# flags; bare names check the EMA_<NAME> env fallback (e.g. --force -> EMA_FORCE).
+_get_flag() {
+    local name
+    for name in "$@"; do
+        if [[ "$name" == -* ]]; then
+            if _contains "$name" "${_FLAGS[@]}"; then echo "yes"; return; fi
+        else
+            local env_name="EMA_$(echo "$name" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
+            if [[ -n "${!env_name:-}" ]] && _env_bool "${!env_name}"; then
+                echo "yes"; return
+            fi
+        fi
+    done
+    echo "no"
+}
+
+# _get_option <name> [default] — parsed value first, then EMA_<NAME> fallback.
+_get_option() {
+    local name="$1" default="${2:-}"
+    if [[ -n "${_OPTIONS[$name]+x}" ]]; then
+        echo "${_OPTIONS[$name]}"
+        return
+    fi
+    if [[ "$name" != -* ]]; then
+        local env_name="EMA_$(echo "$name" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
+        if [[ -n "${!env_name:-}" ]]; then
+            echo "${!env_name}"
+            return
+        fi
+    fi
+    echo "$default"
+}
+
+# prompt_yesno <prompt> <default: yes|no> — schematic's prompt primitive.
+# Reads a y/N or Y/n line; an empty/EOF answer falls back to the default.
+prompt_yesno() {
+    local prompt="$1" default="${2:-no}" answer
+    local yes_default="no"
+    case "${default,,}" in
+        yes|y) yes_default="yes" ;;
+    esac
+    if [[ "$yes_default" == "yes" ]]; then
+        read -r -p "$prompt (Y/n) " answer || true
+    else
+        read -r -p "$prompt (y/N) " answer || true
+    fi
+    case "${answer,,}" in
+        y|yes) return 0 ;;
+        n|no) return 1 ;;
+        *) [[ "$yes_default" == "yes" ]] ;;
+    esac
+}
+
+_is_help() {
+    case "${1:-}" in
+        help|-h|--help|-H|-help) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# --- dev sandbox server helpers (var/mariadb) -------------------------------
+_dev_server_pid() {
+    local pidfile="var/mariadb/mysql.pid"
+    if [[ -f "$pidfile" ]]; then
+        cat "$pidfile"
+    fi
+}
+
+_dev_server_up() {
+    local pid
+    pid="$(_dev_server_pid)"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+_assert_dev_lifecycle() {
+    if [ "${EMA_MODE:-dev}" != "dev" ]; then
+        echo "Error: server lifecycle commands manage the dev sandbox (var/mariadb) only" >&2
+        exit 1
+    fi
+}
+
+_dev_start_server() {
+    local quiet="$1"
+    if _dev_server_up; then
+        [[ "$quiet" == "yes" ]] || echo "already running (pid $(_dev_server_pid))"
+        return
+    fi
+    if [[ ! -d "var/mariadb/data" ]]; then
+        echo "Error: var/mariadb/data not found — initialize the sandbox first (make dev-init)" >&2
+        exit 1
+    fi
+    mkdir -p var/log
+    # mysqld resolves RELATIVE --datadir/--pid-file/--socket against its own
+    # basedir (e.g. the nix store prefix), not the CWD — absolutize like
+    # bin/dev/init-cluster.sh does (mariadb-install-db has the same quirk).
+    local datadir="$PWD/var/mariadb/data"
+    local pidfile="$PWD/var/mariadb/mysql.pid"
+    local sockfile="$PWD/var/mariadb/mysql.sock"
+    mysqld --datadir="$datadir" \
+           --pid-file="$pidfile" \
+           --socket="$sockfile" \
+           --skip-networking >> var/log/mariadb.log 2>&1 &
+    local i pid=""
+    for (( i=0; i<50; i++ )); do
+        pid="$(_dev_server_pid)"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+        echo "Error: MariaDB server failed to start (see var/log/mariadb.log)" >&2
+        exit 1
+    fi
+    [[ "$quiet" == "yes" ]] || echo "started (pid $pid)"
+}
+
+_dev_stop_server() {
+    local quiet="$1"
+    local pid
+    pid="$(_dev_server_pid)"
+    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+        [[ "$quiet" == "yes" ]] || echo "not running"
+        return
+    fi
+    # Graceful shutdown via mariadb-admin over the sandbox socket; fall back to
+    # SIGTERM on the pid, then SIGKILL if it does not exit.
+    if ! mariadb-admin -u root --socket=var/mariadb/mysql.sock shutdown >/dev/null 2>&1; then
+        kill "$pid" 2>/dev/null || true
+    fi
+    local i
+    for (( i=0; i<100; i++ )); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "Error: server did not stop gracefully — sending SIGKILL" >&2
+        kill -9 "$pid" 2>/dev/null || true
+        sleep 0.2
+    fi
+    [[ "$quiet" == "yes" ]] || echo "stopped"
+}
+
+_age() {
+    local path="$1" now mtime diff
+    if [[ ! -e "$path" ]]; then
+        echo "-"
+        return
+    fi
+    now=$(date +%s)
+    mtime=$(stat -c %Y "$path")
+    diff=$(( now - mtime ))
+    if (( diff < 60 )); then
+        echo "${diff}s"
+    elif (( diff < 3600 )); then
+        echo "$(( diff / 60 ))m"
+    elif (( diff < 86400 )); then
+        echo "$(( diff / 3600 ))h"
+    else
+        echo "$(( diff / 86400 ))d"
+    fi
+}
+
+# --- commands ----------------------------------------------------------------
+
+_help_schema() {
+    cat <<'HELP'
+Usage: ema schema <name>
+
+Create a new schema package pkg/<name>-<GUID>/ with default.php and upgrade.sql.
+HELP
+}
+
+_cmd_schema() {
+    if _is_help "$@"; then
+        _help_schema
+        return
+    fi
     if [[ -z "$1" ]]; then
         echo "Error: must provide a name for the schema" >&2
+        _help_schema
         exit 1
     fi
     _assert_repo_root
@@ -110,7 +365,20 @@ EOD
     echo "Directory created: pkg/${directory_name}"
 }
 
+_help_mariadb() {
+    cat <<'HELP'
+Usage: ema mariadb <db> [args...]
+
+Open a MariaDB shell against a database's section. Extra args are passed
+through to the client (e.g. ema mariadb test -e "SHOW TABLES;").
+HELP
+}
+
 _cmd_mariadb() {
+    if _is_help "$@"; then
+        _help_mariadb
+        return
+    fi
     _assert_repo_root
     local dbname="" _args=("$@")
     if [ "${#_args[@]}" -gt 0 ] && [[ "${_args[0]}" != -* ]]; then
@@ -162,6 +430,33 @@ REUTER_LOCAL_EOF
     } >> "$reuter"
 }
 
+# Ensure the prod reuter file has a [<dbname>] section with placeholder creds
+# (deployment tooling overwrites the file on prod; locally you fill them in).
+_ensure_prod_section() {
+    local name="$1"
+    local reuter
+    reuter="$(_reuter_file)"
+    if [[ ! -f "$reuter" ]]; then
+        echo "Error: $reuter not found (prod sections are supplied by deployment tooling)" >&2
+        return 1
+    fi
+    if php -r "
+        \$cnf = parse_ini_file('${reuter}', true);
+        exit(\$cnf && isset(\$cnf['${name}']) ? 0 : 1);
+    " 2>/dev/null; then
+        return 0
+    fi
+    {
+        printf '\n[%s]  ; placeholder — fill in real values\n' "$name"
+        printf 'SERVER=change_me\n'
+        printf 'PORT=3306\n'
+        printf 'DBMS=mariadb\n'
+        printf 'ADMIN_PASSWORD=change_me\n'
+        printf 'READER_PASSWORD=change_me\n'
+        printf 'MYSQL_UNIX_PORT=/path/to/mysql.sock\n'
+    } >> "$reuter"
+}
+
 # Apply srv/<name>.sql with the loaded section's placeholders filled in.
 _apply_schema() {
     local name="$1"
@@ -180,14 +475,84 @@ _apply_schema() {
     "$DBMS" -u root "${_MARIADB_ARGS[@]}" < "$sql" 2>/dev/null || \
         sudo env PATH="$PATH" MYSQL_UNIX_PORT="$MYSQL_UNIX_PORT" "$DBMS" -u root "${_MARIADB_ARGS[@]}" < "$sql"
     rm -r "$workdir"
-    "$DBMS" -u root "${_MARIADB_ARGS[@]}" "$name" 2>/dev/null || \
-        sudo env PATH="$PATH" MYSQL_UNIX_PORT="$MYSQL_UNIX_PORT" "$DBMS" -u root "${_MARIADB_ARGS[@]}" "$name"
+}
+
+# After a successful init, open the shell (ema mariadb <db>) unless
+# -n/--no-shell, in which case print the command instead. When stdin is not a
+# terminal (pipes, CI), print the command too so scripts never block.
+_maybe_open_shell() {
+    local dbname="$1" no_shell
+    no_shell=$(_get_flag --no-shell -n no_shell)
+    if [[ "$no_shell" == "yes" ]]; then
+        echo "Run: ema mariadb $dbname"
+    elif [[ -t 0 ]]; then
+        echo "Opening shell for $dbname (use -n/--no-shell to skip)..."
+        _cmd_mariadb "$dbname"
+    else
+        echo "Run: ema mariadb $dbname"
+    fi
+}
+
+_help_init() {
+    cat <<'HELP'
+Usage: ema init <subcommand>
+
+Subcommands:
+  db <name>                 Create database, users, and grants (reads srv/<name>.sql)
+  tables <root-pkg> <db>    Apply all schema packages in topological order
+
+Flags (both subcommands):
+  -n, --no-shell            Print 'ema mariadb <db>' instead of opening the shell
+  -q, --quiet               Suppress non-error output
+  -v, --verbose             Verbose output
+HELP
+}
+
+_help_init_db() {
+    cat <<'HELP'
+Usage: ema init db <name> [flags]
+
+Create the database, users, and grants for <name> by applying srv/<name>.sql
+with the [<name>] section's placeholders filled in (dev: also ensures the
+var/reuter.local.ini section). Opens a shell afterwards unless -n/--no-shell.
+
+Flags:
+  -n, --no-shell            Print 'ema mariadb <db>' instead of opening the shell
+HELP
+}
+
+_cmd_init() {
+    if _is_help "$@"; then
+        _help_init
+        return
+    fi
+    case "${1:-}" in
+        db)
+            shift
+            _cmd_init_db "$@"
+            ;;
+        tables)
+            shift
+            _cmd_init_tables "$@"
+            ;;
+        *)
+            echo "Error: Unknown init subcommand: ${1:-<missing>}" >&2
+            _help_init
+            exit 1
+            ;;
+    esac
 }
 
 _cmd_init_db() {
-    local name="$1"
+    if _is_help "$@"; then
+        _help_init_db
+        return
+    fi
+    _parse_flags "-n --no-shell -q --quiet -v --verbose" "" "$@"
+    local name="${_POS_ARGS[0]:-}"
     if [[ -z "$name" ]]; then
         echo "Error: must provide a database name (e.g., ema init db mydb)" >&2
+        _help_init_db
         exit 1
     fi
     _assert_repo_root
@@ -204,12 +569,31 @@ _cmd_init_db() {
     _load_target "$name"
     _mariadb_args
     _apply_schema "$name"
+    _maybe_open_shell "$name"
+}
+
+_help_init_tables() {
+    cat <<'HELP'
+Usage: ema init tables <root-pkg> <db> [flags]
+
+Apply all schema packages under <root-pkg> in topological order to <db>.
+Opens a shell afterwards unless -n/--no-shell.
+
+Flags:
+  -n, --no-shell            Print 'ema mariadb <db>' instead of opening the shell
+HELP
 }
 
 _cmd_init_tables() {
-    local root_pkg="$1" dbname="${2:-}"
+    if _is_help "$@"; then
+        _help_init_tables
+        return
+    fi
+    _parse_flags "-n --no-shell -q --quiet -v --verbose" "" "$@"
+    local root_pkg="${_POS_ARGS[0]:-}" dbname="${_POS_ARGS[1]:-}"
     if [[ -z "$root_pkg" ]]; then
         echo "Error: must provide a root package (e.g., ema init tables mypkg-HASH mydb)" >&2
+        _help_init_tables
         exit 1
     fi
     _assert_repo_root
@@ -248,6 +632,429 @@ _cmd_init_tables() {
     rm -r "$workdir"
     "$DBMS" -u root "${_MARIADB_ARGS[@]}" "$dbname" -e "SHOW TABLES;" 2>/dev/null || \
         sudo env PATH="$PATH" MYSQL_UNIX_PORT="$MYSQL_UNIX_PORT" "$DBMS" -u root "${_MARIADB_ARGS[@]}" "$dbname" -e "SHOW TABLES;"
+    _maybe_open_shell "$dbname"
+}
+
+_help_drop() {
+    cat <<'HELP'
+Usage: ema drop <db> [flags]
+
+Drop a database over the resolved [<db>] section (DROP DATABASE as root).
+
+Destruction safety ladder (the section's file is the temp/non-temp signal):
+  sandbox section (var/reuter.local.ini)  prompts "remove sandbox database …? (Y/n)"
+  prod section (reuter.ini)               refuses without --force
+  prod section + --force                  prompts "remove database …? (y/N)" (default No)
+
+Flags:
+  -f, --force       Insist on dropping a non-sandbox (prod) database
+  -q, --quiet       Suppress success output
+  -v, --verbose     Print the DROP statement to stderr
+
+Examples:
+  ema drop test
+  ema drop mydb --force
+HELP
+}
+
+_cmd_drop() {
+    if _is_help "$@"; then
+        _help_drop
+        return
+    fi
+    _parse_flags "-f --force -q --quiet -v --verbose" "" "$@"
+    local dbname="${_POS_ARGS[0]:-}"
+    if [[ -z "$dbname" ]]; then
+        echo "Error: must provide a database name (e.g., ema drop mydb)" >&2
+        _help_drop
+        exit 1
+    fi
+    _assert_repo_root
+    local force quiet verbose
+    force=$(_get_flag --force -f force)
+    quiet=$(_get_flag --quiet -q quiet)
+    verbose=$(_get_flag --verbose -v verbose)
+    # istemp is the file the section resolved from: local file = sandbox,
+    # prod reuter.ini = real database (no meta.json needed).
+    local reuter
+    reuter="$(_reuter_file)"
+    local istemp="no"
+    [[ "$reuter" == "var/reuter.local.ini" ]] && istemp="yes"
+    _load_target "$dbname"
+    _mariadb_args
+    if [[ "$istemp" == "yes" ]] && ! _dev_server_up; then
+        echo "Error: dev server is not running (hint: 'ema start')" >&2
+        exit 1
+    fi
+    if [[ "$istemp" == "no" && "$force" == "no" ]]; then
+        echo "Error: not a sandbox database: $dbname (hint: use 'ema drop --force' to insist on deleting)" >&2
+        exit 1
+    fi
+    local prompt default
+    if [[ "$istemp" == "yes" ]]; then
+        prompt="remove sandbox database $dbname?"
+        default="yes"
+    else
+        prompt="remove database $dbname?"
+        default="no"
+    fi
+    if ! prompt_yesno "$prompt" "$default"; then
+        echo "aborted." >&2
+        exit 1
+    fi
+    local drop_sql
+    drop_sql="DROP DATABASE IF EXISTS \`$dbname\`;"
+    if [[ "$verbose" == "yes" ]]; then
+        echo "Running: $DBMS -u root ${_MARIADB_ARGS[*]} -e \"$drop_sql\"" >&2
+    fi
+    # Same root/sudo fallback as _apply_schema (issue-9 model: root over the
+    # socket in dev, root/unix_socket over MYSQL_UNIX_PORT in prod).
+    "$DBMS" -u root "${_MARIADB_ARGS[@]}" -e "$drop_sql" 2>/dev/null || \
+        sudo env PATH="$PATH" MYSQL_UNIX_PORT="${MYSQL_UNIX_PORT:-}" "$DBMS" -u root "${_MARIADB_ARGS[@]}" -e "$drop_sql"
+    if [[ "$quiet" == "no" ]]; then
+        echo "Dropped database: $dbname"
+    fi
+}
+
+_help_gc() {
+    cat <<'HELP'
+Usage: ema gc [flags]
+
+Remove stopped sandbox databases under var/mariadb (dev only).
+
+The dev server (var/mariadb) must be stopped first (ema stop); gc then
+removes the data directory of every sandbox section listed in
+var/reuter.local.ini (var/mariadb/data/<name>).
+
+Flags:
+  -q, --quiet       Suppress output
+HELP
+}
+
+_cmd_gc() {
+    if _is_help "$@"; then
+        _help_gc
+        return
+    fi
+    _parse_flags "-q --quiet -v --verbose" "" "$@"
+    local quiet verbose
+    quiet=$(_get_flag --quiet -q quiet)
+    verbose=$(_get_flag --verbose -v verbose)
+    _assert_repo_root
+    if [ "${EMA_MODE:-dev}" != "dev" ]; then
+        echo "Error: gc operates on the dev sandbox (var/reuter.local.ini) only" >&2
+        exit 1
+    fi
+    if _dev_server_up; then
+        echo "Error: won't gc while the dev server is running (hint: use 'ema stop' first)" >&2
+        exit 1
+    fi
+    local reuter="var/reuter.local.ini"
+    if [[ ! -f "$reuter" ]]; then
+        echo "No sandbox sections in $reuter — nothing to gc."
+        return
+    fi
+    local names
+    names=$(php -r "
+        \$cnf = parse_ini_file('${reuter}', true);
+        if (!\$cnf) exit(0);
+        foreach (array_keys(\$cnf) as \$k) echo \$k, PHP_EOL;
+    ") || exit 1
+    local name dbdir found="no"
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        dbdir="var/mariadb/data/$name"
+        if [[ -d "$dbdir" ]]; then
+            found="yes"
+            rm -rf "$dbdir"
+            [[ "$quiet" == "no" ]] && echo "gc: removed $dbdir"
+        elif [[ "$verbose" == "yes" ]]; then
+            echo "gc: no data dir for sandbox section '$name'" >&2
+        fi
+    done <<< "$names"
+    if [[ "$found" == "no" && "$quiet" == "no" ]]; then
+        echo "Nothing to gc."
+    fi
+}
+
+_help_status() {
+    cat <<'HELP'
+Usage: ema status [flags]
+
+List the connection sections of the active reuter file with their state:
+  dev:  server up/down (var/mariadb/mysql.pid), endpoint, and the age of each
+        sandbox's data directory (var/mariadb/data/<name>)
+  prod: per-section reachability (TCP port, or the socket file for sections
+        that define MYSQL_UNIX_PORT)
+
+Flags:
+  -v, --verbose     Verbose output to stderr
+HELP
+}
+
+_cmd_status() {
+    if _is_help "$@"; then
+        _help_status
+        return
+    fi
+    _parse_flags "-q --quiet -v --verbose" "" "$@"
+    local quiet verbose
+    quiet=$(_get_flag --quiet -q quiet)
+    verbose=$(_get_flag --verbose -v verbose)
+    _assert_repo_root
+    local reuter
+    reuter="$(_reuter_file)"
+    if [[ ! -f "$reuter" ]]; then
+        echo "Error: $reuter not found (dev: run 'ema init db <name>')" >&2
+        exit 1
+    fi
+    local names
+    names=$(php -r "
+        \$cnf = parse_ini_file('${reuter}', true);
+        if (!\$cnf) exit(0);
+        foreach (array_keys(\$cnf) as \$k) echo \$k, PHP_EOL;
+    ") || exit 1
+    if [[ -z "$names" ]]; then
+        echo "No sections in $reuter."
+        return
+    fi
+    local dev_mode="no"
+    [ "${EMA_MODE:-dev}" = "dev" ] && dev_mode="yes"
+    local server_state=""
+    if [[ "$dev_mode" == "yes" ]]; then
+        local pid
+        pid="$(_dev_server_pid)"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            server_state="up"
+            [[ "$verbose" == "yes" ]] && echo "server: up (pid $pid)" >&2
+        else
+            server_state="dn"
+            [[ "$verbose" == "yes" ]] && echo "server: down" >&2
+        fi
+    fi
+    local name
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        local vars endpoint state age
+        vars=$(php -r "
+            \$cnf = parse_ini_file('${reuter}', true);
+            foreach (['SERVER','PORT','MYSQL_UNIX_PORT'] as \$k)
+                if (isset(\$cnf['${name}'][\$k])) echo \$k, '=', escapeshellarg(\$cnf['${name}'][\$k]), PHP_EOL;
+        ")
+        eval "$vars"
+        if [[ -n "${MYSQL_UNIX_PORT:-}" ]]; then
+            endpoint="socket $MYSQL_UNIX_PORT"
+            if [[ "$dev_mode" == "no" ]]; then
+                if [[ -S "$MYSQL_UNIX_PORT" ]]; then state="up"; else state="dn"; fi
+            fi
+        else
+            endpoint="${SERVER:-?}:${PORT:-?}"
+            if [[ "$dev_mode" == "no" ]]; then
+                if timeout 2 bash -c "</dev/tcp/$SERVER/$PORT" 2>/dev/null; then state="up"; else state="dn"; fi
+            fi
+        fi
+        if [[ "$dev_mode" == "yes" ]]; then
+            state="$server_state"
+            age="$(_age "var/mariadb/data/$name")"
+        else
+            age="-"
+        fi
+        printf '[%s]  %-2s  %-30s  %-6s  %s\n' "$name" "$state" "$endpoint" "$age" "$reuter"
+        unset SERVER PORT MYSQL_UNIX_PORT
+    done <<< "$names"
+}
+
+_help_start() {
+    cat <<'HELP'
+Usage: ema start [flags]
+
+Start the dev sandbox server (var/mariadb, --skip-networking), same flags as
+init-cluster.sh / the dev shell. Dev mode only.
+
+Flags:
+  -q, --quiet       Suppress output
+HELP
+}
+
+_cmd_start() {
+    if _is_help "$@"; then
+        _help_start
+        return
+    fi
+    _parse_flags "-q --quiet" "" "$@"
+    local quiet
+    quiet=$(_get_flag --quiet -q quiet)
+    _assert_repo_root
+    _assert_dev_lifecycle
+    _dev_start_server "$quiet"
+}
+
+_help_stop() {
+    cat <<'HELP'
+Usage: ema stop [flags]
+
+Stop the dev sandbox server (var/mariadb): mariadb-admin shutdown over the
+sandbox socket, falling back to SIGTERM/SIGKILL on var/mariadb/mysql.pid.
+Dev mode only.
+
+Flags:
+  -q, --quiet       Suppress output
+HELP
+}
+
+_cmd_stop() {
+    if _is_help "$@"; then
+        _help_stop
+        return
+    fi
+    _parse_flags "-q --quiet" "" "$@"
+    local quiet
+    quiet=$(_get_flag --quiet -q quiet)
+    _assert_repo_root
+    _assert_dev_lifecycle
+    _dev_stop_server "$quiet"
+}
+
+_help_restart() {
+    cat <<'HELP'
+Usage: ema restart [flags]
+
+Restart the dev sandbox server (var/mariadb). Dev mode only.
+
+Flags:
+  -q, --quiet       Suppress output
+HELP
+}
+
+_cmd_restart() {
+    if _is_help "$@"; then
+        _help_restart
+        return
+    fi
+    _parse_flags "-q --quiet" "" "$@"
+    local quiet
+    quiet=$(_get_flag --quiet -q quiet)
+    _assert_repo_root
+    _assert_dev_lifecycle
+    _dev_stop_server "$quiet"
+    _dev_start_server "$quiet"
+}
+
+_help_database() {
+    cat <<'HELP'
+Usage: ema database <name>
+
+Create srv/<name>.sql — a stub with {{placeholder}} keys, same shape as the
+dev srv/test.sql — and a [<name>] section in the connection file:
+  dev:  var/reuter.local.ini with generated credentials (ready to use)
+  prod: the active prod reuter file with change_me placeholders for the
+        deployment tooling to fill in
+HELP
+}
+
+_cmd_database() {
+    if _is_help "$@"; then
+        _help_database
+        return
+    fi
+    local name="${1:-}"
+    if [[ -z "$name" ]]; then
+        echo "Error: must provide a database name (e.g., ema database mydb)" >&2
+        _help_database
+        exit 1
+    fi
+    _assert_repo_root
+    local srv_file="srv/${name}.sql"
+    if [[ -f "$srv_file" ]]; then
+        echo "Error: $srv_file already exists" >&2
+        exit 1
+    fi
+    cat > "$srv_file" <<SQL_EOF
+-- ema database stub for ${name}, consumed by \`ema init db ${name}\`.
+-- Placeholders are filled from the [${name}] section of the connection file
+-- ({{dbname}}, {{servername}}, {{admin_password}}, {{reader_password}}).
+SET check_constraint_checks = OFF;
+DROP DATABASE IF EXISTS {{dbname}};
+CREATE OR REPLACE DATABASE {{dbname}}
+COMMENT 'ema database ${name}'
+CHARACTER SET = 'utf8'
+COLLATE = 'utf8_spanish_ci';
+
+DROP USER IF EXISTS 'admin'@'{{servername}}';
+CREATE USER 'admin'@'{{servername}}' IDENTIFIED BY '{{admin_password}}';
+
+DROP USER IF EXISTS 'reader'@'{{servername}}';
+CREATE USER 'reader'@'{{servername}}' IDENTIFIED BY '{{reader_password}}';
+
+GRANT SELECT ON {{dbname}}.* TO 'reader'@'{{servername}}';
+GRANT SELECT, INSERT, UPDATE, DELETE ON {{dbname}}.* TO 'admin'@'{{servername}}';
+SQL_EOF
+    if [ "${EMA_MODE:-dev}" = "dev" ]; then
+        _ensure_local_section "$name"
+        echo "Created $srv_file (+ section [$name] in var/reuter.local.ini)"
+    else
+        _ensure_prod_section "$name" || exit 1
+        echo "Created $srv_file (+ section [$name] in $(_reuter_file))"
+    fi
+}
+
+_help_inspect() {
+    cat <<'HELP'
+Usage: ema inspect <root-pkg>
+
+Inspect a schema package: print its dependency graph and topological ordering
+(CLI wrapper over src/sort_schemas.php).
+HELP
+}
+
+_cmd_inspect() {
+    if _is_help "$@"; then
+        _help_inspect
+        return
+    fi
+    local root_pkg="${1:-}"
+    if [[ -z "$root_pkg" ]]; then
+        echo "Error: must provide a root package (e.g., ema inspect mypkg-HASH)" >&2
+        _help_inspect
+        exit 1
+    fi
+    _assert_repo_root
+    if [[ ! -d "pkg/$root_pkg" ]]; then
+        echo "Error: pkg/$root_pkg not found" >&2
+        exit 1
+    fi
+    php "$_EMA_LIB/sort_schemas.php" "$root_pkg"
+}
+
+_help_deps() {
+    cat <<'HELP'
+Usage: ema deps <root-pkg>
+
+Print the schema packages under <root-pkg> in topological order, one per line
+(the apply order used by 'ema init tables <root-pkg> <db>').
+HELP
+}
+
+_cmd_deps() {
+    if _is_help "$@"; then
+        _help_deps
+        return
+    fi
+    local root_pkg="${1:-}"
+    if [[ -z "$root_pkg" ]]; then
+        echo "Error: must provide a root package (e.g., ema deps mypkg-HASH)" >&2
+        _help_deps
+        exit 1
+    fi
+    _assert_repo_root
+    if [[ ! -d "pkg/$root_pkg" ]]; then
+        echo "Error: pkg/$root_pkg not found" >&2
+        exit 1
+    fi
+    php -r "
+        require '${_EMA_LIB}/sort_schemas.php';
+        echo implode(PHP_EOL, build_dependency_graph('${root_pkg}')->topological_sort()), PHP_EOL;
+    "
 }
 
 if [[ $# -eq 0 ]]; then
@@ -258,7 +1065,11 @@ fi
 case "$1" in
     schema)
         shift
-        schema "$@"
+        _cmd_schema "$@"
+        ;;
+    database)
+        shift
+        _cmd_database "$@"
         ;;
     mariadb)
         shift
@@ -266,23 +1077,41 @@ case "$1" in
         ;;
     init)
         shift
-        case "$1" in
-            db)
-                shift
-                _cmd_init_db "$@"
-                ;;
-            tables)
-                shift
-                _cmd_init_tables "$@"
-                ;;
-            *)
-                echo "Error: Unknown init subcommand: ${1:-<missing>}" >&2
-                show_help
-                exit 1
-                ;;
-        esac
+        _cmd_init "$@"
         ;;
-    -h|--help)
+    drop)
+        shift
+        _cmd_drop "$@"
+        ;;
+    gc)
+        shift
+        _cmd_gc "$@"
+        ;;
+    status)
+        shift
+        _cmd_status "$@"
+        ;;
+    start)
+        shift
+        _cmd_start "$@"
+        ;;
+    stop)
+        shift
+        _cmd_stop "$@"
+        ;;
+    restart)
+        shift
+        _cmd_restart "$@"
+        ;;
+    inspect)
+        shift
+        _cmd_inspect "$@"
+        ;;
+    deps)
+        shift
+        _cmd_deps "$@"
+        ;;
+    -h|--help|help)
         show_help
         ;;
     -v|--version)
