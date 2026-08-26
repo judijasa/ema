@@ -39,6 +39,8 @@
             cp src/sort_schemas.php $out/share/ema/sort_schemas.php
             cp ema $out/bin/.ema-unwrapped
             chmod +x $out/bin/.ema-unwrapped
+            cp bin/dev/init-cluster.sh $out/bin/init-cluster.sh
+            chmod +x $out/bin/init-cluster.sh
             makeWrapper $out/bin/.ema-unwrapped $out/bin/ema \
               --set EMA_LIB "$out/share/ema" \
               --suffix PATH : ${phpPkg}/bin
