@@ -187,7 +187,7 @@ etc/reuter.ini.template. Cosmetic fix pending.
 
 Problem: the prod `.env` no longer carries `MYSQL_UNIX_PORT` — the
 multi-server-deploy change dropped the `MYSQL_*` keys (TCP everywhere; see
-php_daas_framework/doc/2026-08-22-multi-server-deploy.md). ema reaches the
+php_daas_framework/doc/plans/2026-08-22-multi-server-deploy.md). ema reaches the
 instance over the socket only when `MYSQL_UNIX_PORT` is set; otherwise it
 falls back to TCP (`-h SERVER -P PORT`) and root over TCP fails (prod root =
 unix_socket auth). So "ssh to the DB host and `ema init db <name>`" cannot
@@ -220,7 +220,7 @@ Implemented on the ema side (2026-08-24):
 
 The env-generation refactor (env.prod -> deploy.conf) is a framework concern
 and is tracked separately in
-php_daas_framework/doc/2026-08-24-env-prod-merge-into-deploy-conf.md — not in
+php_daas_framework/doc/plans/2026-08-24-env-prod-merge-into-deploy-conf.md — not in
 this doc.
 
 Unblocks issue 9.
