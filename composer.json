@@ -1,0 +1,13 @@
+{
+    "name": "judijasa/ema",
+    "description": "Package manager for MariaDB — schema packages + CLI distributed as a Composer library",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": ">=8.1"
+    },
+    "bin": [
+        "ema",
+        "bin/dev/init-cluster.sh"
+    ]
+}

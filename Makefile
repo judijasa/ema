@@ -1,5 +1,5 @@
 # ema Makefile (dev-only; the `ema` CLI and the MariaDB dev-init script
-# init-cluster.sh are also shipped in the nix package for consumers — see
+# init-cluster.sh are also shipped via Composer for consumers — see
 # "Standalone template usage" in the README).
 
 SHELL := $(shell which bash 2>/dev/null)

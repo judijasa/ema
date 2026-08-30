@@ -1,0 +1,11 @@
+# Dev-only files excluded from the Composer dist (git archive export).
+# The dist ships: ema, src/, pkg/, bin/dev/init-cluster.sh (Composer bin),
+# composer.json, README.md, LICENSE.
+doc/            export-ignore
+etc/            export-ignore
+srv/            export-ignore
+Makefile        export-ignore
+flake.nix       export-ignore
+flake.lock      export-ignore
+.gitignore      export-ignore
+var/            export-ignore

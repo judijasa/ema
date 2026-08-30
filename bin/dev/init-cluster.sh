@@ -2,8 +2,8 @@
 # Initialize the local, isolated MariaDB cluster used by the dev sandbox and
 # start its daemon if the data dir is empty.
 # Backend for the Makefile target _dev-init-cluster (make dev-init).
-# Owned by ema and shipped in ema's nix package (packages.default) so
-# consumers call it from PATH instead of keeping
+# Owned by ema and shipped via Composer (composer.json `bin`) so consumers
+# call it from PATH (vendor/bin/init-cluster.sh) instead of keeping
 # a duplicate copy. Fully parameterized; the consumer's data paths live in
 # the consumer's Makefile variables.
 # Usage: init-cluster.sh <data-dir> <pid-file> <unix-socket>

@@ -86,18 +86,18 @@ the section's provenance file — no extra metadata:
 ## Standalone template usage
 
 This repo is dual-role. It is a **tool consumed** by other projects —
-consumers pin `ema.packages.${system}.default`, which now provides
-both the `ema` CLI and `init-cluster.sh` (the isolated MariaDB dev-init) on
-PATH — and it is also a **standalone, forkable template** that behaves like
+consumers `require judijasa/ema` via Composer, which provides both the
+`ema` CLI and `init-cluster.sh` (the isolated MariaDB dev-init) at
+`vendor/bin/` — and it is also a **standalone, forkable template** that behaves like
 its own consumer: `make dev-init` and the `ema init db` / `ema init tables`
 workflows run from inside this repo exactly as they would in a consumer,
 with only the data being this repo's own (`pkg/`, `srv/`,
 `var/reuter.local.ini`, `etc/reuter.ini`).
 
 The one structural difference vs. an external consumer: ema does not consume
-itself through its own flake — its Makefile and shell invoke the local copies
+itself through Composer — its Makefile and shell invoke the local copies
 (the in-tree `ema` script, `bin/dev/init-cluster.sh`, `src/`), and those same
-files are the artifacts the nix package installs. **ema owns the mechanism
+files are the artifacts Composer installs. **ema owns the mechanism
 (the CLI and the MariaDB dev-init); the consumer (or this repo, standalone)
 owns the data and policy.**
 
@@ -134,15 +134,30 @@ ema mariadb test
 SHOW TABLES;
 ```
 
-`make dev-init` here is deliberately simpler than a consumer's: ema has no
-composer package, no `.env` (it reads `var/reuter.local.ini` or
+`make dev-init` here is deliberately simpler than a consumer's: it needs no
+`composer install`, no `.env` (it reads `var/reuter.local.ini` or
 `$REUTER_INI` / `etc/reuter.ini`, never `.env`), no machines.ini, and no
 git-hooks. The only generic step is the isolated MariaDB cluster init — and
 that step (`init-cluster.sh`) is the single piece consumers reuse.
 
 ## Reuse contract (for consumers)
 
-The nix package (`packages.default`) ships two reusable artifacts on PATH:
+ema is a plain Composer package (`judijasa/ema`). A consumer adds a VCS
+`repositories` entry for this repo and `require`s it (directly, or
+transitively through an intermediate package):
+
+```json
+{
+    "repositories": [
+        { "type": "vcs", "url": "<ema git url>" }
+    ],
+    "require": {
+        "judijasa/ema": "dev-main"
+    }
+}
+```
+
+Composer installs two reusable artifacts at `vendor/bin/`:
 
 | Artifact | Purpose |
 |---|---|
@@ -150,6 +165,20 @@ The nix package (`packages.default`) ships two reusable artifacts on PATH:
 | `init-cluster.sh` | the isolated MariaDB dev-init (`mariadb-install-db` + start `mysqld`), fully parameterized (data-dir/pid-file/socket) |
 
 Consumers call `init-cluster.sh` from their own `make dev-init` with their
-own paths, instead of keeping a
-duplicate copy. Everything else (`.env` generation, composer, git-hooks) is
-consumer policy and stays in the consumer.
+own paths, instead of keeping a duplicate copy. Everything else (`.env`
+generation, `composer install` order, git-hooks) is consumer policy and
+stays in the consumer.
+
+### Schema package lookup (multi-provider)
+
+`ema inspect` / `ema deps` / `ema init tables` resolve a schema package
+(`<name>-<GUID>`) across, in order:
+
+1. the consumer's local `pkg/` (read + write — `ema schema` writes only here);
+2. ema's own `pkg/`;
+3. every installed Composer package that ships a `pkg/` subdirectory
+   (discovered via `vendor/composer/installed.php`).
+
+GUIDs make a match across roots unambiguous, so a consumer can depend on
+schema packages shipped by *any* installed provider — not just ema — and ema
+can arrive transitively.

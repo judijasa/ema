@@ -1,8 +1,10 @@
 #!/bin/bash
 
-# When installed via nix, EMA_LIB is set by makeWrapper to the share directory.
-# When run directly from the repo, fall back to the adjacent src/ directory.
-_EMA_LIB="${EMA_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/src}"
+# Resolve the real location of this script so _EMA_LIB self-locates whether
+# run in-tree, or via the Composer `vendor/bin/ema` symlink. EMA_LIB (env)
+# still wins when set.
+_EMA_SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+_EMA_LIB="${EMA_LIB:-$(cd "$(dirname "${_EMA_SELF}")" && pwd)/src}"
 
 PROGRAM_NAME="ema"
 
@@ -56,6 +58,20 @@ _assert_repo_root() {
         echo "Error: pkg/ not found — run ema from your project root" >&2
         exit 1
     fi
+}
+
+# Resolve a schema package dir via sort_schemas.php's find_package().
+# Prints the absolute dir on success (return 0); prints nothing and returns 1
+# when the package is absent from every root (local pkg/ or an installed
+# Composer provider's pkg/).
+_find_package() {
+    local schema="$1"
+    php -r "
+        require '${_EMA_LIB}/sort_schemas.php';
+        \$dir = find_package('${schema}');
+        if (\$dir !== null) { echo \$dir; exit(0); }
+        exit(1);
+    "
 }
 
 # The connection file is chosen by machine mode, not by the command:
@@ -597,8 +613,8 @@ _cmd_init_tables() {
         exit 1
     fi
     _assert_repo_root
-    if [[ ! -d "pkg/$root_pkg" ]]; then
-        echo "Error: pkg/$root_pkg not found" >&2
+    if ! _find_package "$root_pkg" >/dev/null; then
+        echo "Error: schema package '$root_pkg' not found" >&2
         exit 1
     fi
     # Root is allowed only in prod mode (same issue-9 model as init db);
@@ -621,7 +637,12 @@ _cmd_init_tables() {
     local pseudo_sql="${workdir}/pseudo_query.sql"
     local sql="${workdir}/query.sql"
     for schema in "${schemas_array[@]}"; do
-        cat "pkg/$schema/upgrade.sql" >> "$pseudo_sql"
+        schema_dir="$(_find_package "$schema")" || {
+            echo "Error: schema package '$schema' not found" >&2
+            rm -r "$workdir"
+            exit 1
+        }
+        cat "$schema_dir/upgrade.sql" >> "$pseudo_sql"
         echo "" >> "$pseudo_sql"
     done
     { echo "SET FOREIGN_KEY_CHECKS=0;"; \
@@ -1019,8 +1040,8 @@ _cmd_inspect() {
         exit 1
     fi
     _assert_repo_root
-    if [[ ! -d "pkg/$root_pkg" ]]; then
-        echo "Error: pkg/$root_pkg not found" >&2
+    if ! _find_package "$root_pkg" >/dev/null; then
+        echo "Error: schema package '$root_pkg' not found" >&2
         exit 1
     fi
     php "$_EMA_LIB/sort_schemas.php" "$root_pkg"
@@ -1047,8 +1068,8 @@ _cmd_deps() {
         exit 1
     fi
     _assert_repo_root
-    if [[ ! -d "pkg/$root_pkg" ]]; then
-        echo "Error: pkg/$root_pkg not found" >&2
+    if ! _find_package "$root_pkg" >/dev/null; then
+        echo "Error: schema package '$root_pkg' not found" >&2
         exit 1
     fi
     php -r "

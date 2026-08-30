@@ -44,8 +44,65 @@ class Graph {
     }
 }
 
+// package_roots(): the ordered list of directories that may hold schema
+// packages (each a <name>-<GUID>/ subdir). Local first (read + write --
+// "ema schema" writes only there), then ema's own pkg/ (the standalone-dev
+// fallback), then every installed Composer package that ships a pkg/
+// subdirectory (read-only, discovered via vendor/composer/installed.php).
+function package_roots() {
+    static $roots = null;
+    if ($roots !== null) {
+        return $roots;
+    }
+    $roots = array();
+
+    // 1. The consumer's own schema packages (read + write).
+    if (is_dir('pkg')) {
+        $roots[] = realpath('pkg');
+    }
+
+    // 2. ema's own pkg/ -- the standalone-dev fallback. Also reached via
+    //    installed.php when ema is Composer-installed, so this is a harmless
+    //    duplicate there and essential when there is no vendor/.
+    $own = dirname(__DIR__) . '/pkg';
+    if (is_dir($own)) {
+        $roots[] = realpath($own);
+    }
+
+    // 3. Every installed Composer package that ships a pkg/ subdirectory.
+    if (is_file('vendor/composer/installed.php')) {
+        $data = require 'vendor/composer/installed.php';
+        foreach ($data['versions'] ?? array() as $version) {
+            $install_path = $version['install_path'] ?? null;
+            if ($install_path && is_dir($install_path . '/pkg')) {
+                $roots[] = realpath($install_path . '/pkg');
+            }
+        }
+    }
+
+    $roots = array_values(array_unique($roots));
+    return $roots;
+}
+
+// find_package(): locate a schema package dir by <name>-<GUID> across all
+// roots, or return null when absent. GUIDs keep cross-root matches unambiguous.
+function find_package($schema) {
+    foreach (package_roots() as $root) {
+        $dir = $root . '/' . $schema;
+        if (is_dir($dir)) {
+            return $dir;
+        }
+    }
+    return null;
+}
+
 function extract_dependencies($schema) {
-    require_once 'pkg/' . $schema . '/default.php';
+    $dir = find_package($schema);
+    if ($dir === null) {
+        fwrite(STDERR, "Error: schema package '$schema' not found\n");
+        exit(1);
+    }
+    require_once $dir . '/default.php';
     return $dependencies;
 }
 
@@ -64,8 +121,7 @@ function build_dependency_graph($root_schema) {
         $dependencies = extract_dependencies($current_schema);
         foreach ($dependencies as $dependency) {
             $graph->add_edge($current_schema, $dependency);
-            $dependency_path = 'pkg/' . $dependency . '/default.php';
-            if (file_exists($dependency_path)) {
+            if (find_package($dependency) !== null) {
                 $stack->push($dependency);
             }
         }

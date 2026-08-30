@@ -29,27 +29,6 @@
         ];
       in
       {
-        packages.default = pkgs.stdenv.mkDerivation {
-          pname = "ema";
-          version = "1.0.0";
-          src = ./.;
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-          installPhase = ''
-            mkdir -p $out/bin $out/share/ema
-            cp src/sort_schemas.php $out/share/ema/sort_schemas.php
-            cp ema $out/bin/.ema-unwrapped
-            chmod +x $out/bin/.ema-unwrapped
-            cp bin/dev/init-cluster.sh $out/bin/init-cluster.sh
-            chmod +x $out/bin/init-cluster.sh
-            # Bundle jq: `ema init tables` parses schema JSON with jq, so the
-            # wrapped CLI must carry it on PATH (consumers no longer ship it).
-            makeWrapper $out/bin/.ema-unwrapped $out/bin/ema \
-              --set EMA_LIB "$out/share/ema" \
-              --suffix PATH : ${phpPkg}/bin \
-              --suffix PATH : ${jqPkg}/bin
-          '';
-        };
-
         devShells.default = pkgs.mkShell {
           buildInputs = commonPackages ++ [
             mariadbPkg
