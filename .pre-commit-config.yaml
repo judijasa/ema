@@ -1,0 +1,14 @@
+# Hosts the flake gate (hooks/pre-commit-flake.sh): refreshes flake.lock in
+# place when flake.nix is staged, never auto-stages. Pre-commit stage only —
+# this repo has no pre-push gates yet.
+default_install_hook_types: [pre-commit]
+
+repos:
+  - repo: local
+    hooks:
+      - id: flake
+        name: Nix flake lock in sync check
+        entry: ./hooks/pre-commit-flake.sh
+        language: script
+        files: ^flake\.nix$
+        stages: [pre-commit]
