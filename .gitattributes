@@ -9,3 +9,4 @@ flake.nix       export-ignore
 flake.lock      export-ignore
 .gitignore      export-ignore
 var/            export-ignore
+bin/dev/shell-enter.sh export-ignore

@@ -35,26 +35,7 @@
             phpComposer
           ];
           shellHook = ''
-            export EMA_REPO_PATH="$PWD"
-            export EMA_LIB="$EMA_REPO_PATH/src"
-
-            export MYSQL_BASE_DIR="$EMA_REPO_PATH/var/mariadb"
-            export MYSQL_DATA_DIR="$MYSQL_BASE_DIR/data"
-            export MYSQL_UNIX_PORT="$MYSQL_BASE_DIR/mysql.sock"
-            export MYSQL_PID_FILE="$MYSQL_BASE_DIR/mysql.pid"
-
-            if [ -d "$MYSQL_DATA_DIR" ]; then
-              echo "Starting isolated MariaDB server..."
-              mysqld --datadir="$MYSQL_DATA_DIR" \
-                     --pid-file="$MYSQL_PID_FILE" \
-                     --socket="$MYSQL_UNIX_PORT" \
-                     --skip-networking > /dev/null 2>&1 &
-
-              MARIADB_PID=$!
-              trap "echo 'Stopping local MariaDB server...'; kill $MARIADB_PID; wait $MARIADB_PID 2>/dev/null" EXIT
-            fi
-
-            export EMA_MODE="dev"
+            . ./bin/dev/shell-enter.sh ema
 
             # Customize the prompt (PS1)
             # Define ANSI color codes for readability
@@ -63,11 +44,6 @@
             GREEN='\033[0;32m'
             NC='\033[0m' # No Color
             export PS1="\[$CYAN\] \u@\h:\[$GREEN\]\w\[$NC\]\$ "
-
-            # Inherit nix shell env in tmux (doesn't include PS1)
-            # Requires `set -g default-command ...` in .tmux.conf
-            PROJECT_NAME="ema"
-            alias tmux="command tmux -L \$PROJECT_NAME new-session -A -s \$PROJECT_NAME"
           '';
         };
       }
