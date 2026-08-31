@@ -56,10 +56,18 @@
 
             export EMA_MODE="dev"
 
+            # Customize the prompt (PS1)
+            # Define ANSI color codes for readability
             CYAN='\033[0;36m'
+            PURPLE='\033[0;35m'
             GREEN='\033[0;32m'
-            NC='\033[0m'
+            NC='\033[0m' # No Color
             export PS1="\[$CYAN\] \u@\h:\[$GREEN\]\w\[$NC\]\$ "
+
+            # Inherit nix shell env in tmux (doesn't include PS1)
+            # Requires `set -g default-command ...` in .tmux.conf
+            PROJECT_NAME="ema"
+            alias tmux="command tmux -L \$PROJECT_NAME new-session -A -s \$PROJECT_NAME"
           '';
         };
       }
