@@ -1,4 +1,5 @@
 # Generated / machine-local files.
 var/
 .env
+composer.lock
 /etc/reuter.ini
