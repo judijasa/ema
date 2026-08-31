@@ -182,3 +182,16 @@ stays in the consumer.
 GUIDs make a match across roots unambiguous, so a consumer can depend on
 schema packages shipped by *any* installed provider — not just ema — and ema
 can arrive transitively.
+
+### One-way direction (ema is the terminal provider)
+
+ema's `pkg/` packages serve as **dependencies of schema packages shipped by
+other repos**. Every cross-repo dependency edge points *into* ema: ema never
+depends on another repo's `pkg/`, and its `composer.json` carries no
+`require`/`require-dev`/`repositories` entries for sibling repos — it only
+ships `pkg/`. This is structural, not asserted: ema requires nothing
+external, so a consumer can depend on ema without ema depending back.
+
+Consumers declare `judijasa/ema` directly and reference its packages by
+`<name>-<GUID>`; the multi-provider lookup above resolves them from the
+installed package's `pkg/` without ema knowing any specific provider's name.
