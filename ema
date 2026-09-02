@@ -28,8 +28,8 @@ Database lifecycle & shell:
 
 Schema packages:
   schema <name>               Create a new schema package in pkg/
-  database <name>             Create srv/<name>.sql stub + [<name>] section
-  init db <name>              Create database, users, and grants (reads srv/<name>.sql)
+  database <name>             Create srv/<name>-<GUID>/ package + [<name>] section
+  init db <name>              Create database, users, and grants (reads srv/<name>-<GUID>/)
   init tables <root-pkg> <db> Apply all schema packages in topological order
   inspect <root-pkg>          Show the schema dependency graph
   deps <root-pkg>             List schema packages in topological order
@@ -368,9 +368,9 @@ _cmd_schema() {
         echo "Error: Schema with prefix '$prefix' already exists in pkg/." >&2
         return 1
     fi
-    local random_suffix
-    random_suffix=$(tr -dc 'A-Z0-9' < /dev/urandom | fold -w 16 | head -n 1)
-    local directory_name="${prefix}-${random_suffix}"
+    local guid
+    guid=$(_gen_guid S0)
+    local directory_name="${prefix}-${guid}"
     mkdir -p "pkg/${directory_name}"
     touch "pkg/${directory_name}/upgrade.sql"
     cat <<EOD > "pkg/${directory_name}/default.php"
@@ -413,6 +413,16 @@ _cmd_mariadb() {
 
 _gen_password() {
     tr -dc 'A-Za-z0-9' < /dev/urandom | fold -w 24 | head -n 1
+}
+
+# <prefix> + 14 random base36 chars -- schematic's type-prefixed GUID
+# convention (16 chars total). The prefix maps a package to its kind: S0 for
+# schema packages (pkg/), D0 for database packages (srv/).
+_gen_guid() {
+    local prefix="$1"
+    local suffix
+    suffix=$(tr -dc 'A-Z0-9' < /dev/urandom | fold -w 14 | head -n 1)
+    printf '%s%s\n' "$prefix" "$suffix"
 }
 
 # Ensure var/reuter.local.ini has a [<dbname>] section for the dev sandbox:
@@ -473,19 +483,33 @@ _ensure_prod_section() {
     } >> "$reuter"
 }
 
-# Apply srv/<name>.sql with the loaded section's placeholders filled in.
+# Resolve the srv/ database package dir for <name> (srv/<name>-<GUID>/).
+_find_srv_package() {
+    local name="$1"
+    local dirs
+    mapfile -t dirs < <(ls -d "srv/${name}"-*/ 2>/dev/null)
+    if [[ ${#dirs[@]} -eq 0 ]]; then
+        echo "Error: srv/${name}-<GUID>/ package not found" >&2
+        return 1
+    fi
+    if [[ ${#dirs[@]} -gt 1 ]]; then
+        echo "Error: multiple srv/${name}-* packages found: ${dirs[*]}" >&2
+        return 1
+    fi
+    printf '%s\n' "${dirs[0]%/}"
+}
+
+# Apply srv/<name>-<GUID>/upgrade.sql with the loaded section's placeholders
+# filled in.
 _apply_schema() {
     local name="$1"
-    local srv_file="srv/${name}.sql"
-    if [[ ! -f "$srv_file" ]]; then
-        echo "Error: $srv_file not found" >&2
-        exit 1
-    fi
+    local srv_dir
+    srv_dir="$(_find_srv_package "$name")" || exit 1
     local workdir
     workdir=$(mktemp -d /tmp/db_schemas_XXXXXX)
     local pseudo_sql="${workdir}/pseudo_query.sql"
     local sql="${workdir}/query.sql"
-    cat "$srv_file" >> "$pseudo_sql"
+    cat "${srv_dir}/upgrade.sql" >> "$pseudo_sql"
     sed "s/{{dbname}}/${name}/g; s/{{servername}}/${SERVER}/g; s/{{admin_password}}/${ADMIN_PASSWORD}/g; s/{{reader_password}}/${READER_PASSWORD}/g;" \
         "$pseudo_sql" > "$sql"
     "$DBMS" -u root "${_MARIADB_ARGS[@]}" < "$sql" 2>/dev/null || \
@@ -514,7 +538,7 @@ _help_init() {
 Usage: ema init <subcommand>
 
 Subcommands:
-  db <name>                 Create database, users, and grants (reads srv/<name>.sql)
+  db <name>                 Create database, users, and grants (reads srv/<name>-<GUID>/)
   tables <root-pkg> <db>    Apply all schema packages in topological order
 
 Flags (both subcommands):
@@ -528,9 +552,10 @@ _help_init_db() {
     cat <<'HELP'
 Usage: ema init db <name> [flags]
 
-Create the database, users, and grants for <name> by applying srv/<name>.sql
-with the [<name>] section's placeholders filled in (dev: also ensures the
-var/reuter.local.ini section). Opens a shell afterwards unless -n/--no-shell.
+Create the database, users, and grants for <name> by applying
+srv/<name>-<GUID>/upgrade.sql with the [<name>] section's placeholders filled
+in (dev: also ensures the var/reuter.local.ini section). Opens a shell
+afterwards unless -n/--no-shell.
 
 Flags:
   -n, --no-shell            Print 'ema mariadb <db>' instead of opening the shell
@@ -965,8 +990,9 @@ _help_database() {
     cat <<'HELP'
 Usage: ema database <name>
 
-Create srv/<name>.sql — a stub with {{placeholder}} keys, same shape as the
-dev srv/test.sql — and a [<name>] section in the connection file:
+Create a database package srv/<name>-<GUID>/ (default.php + upgrade.sql) with
+{{placeholder}} keys in upgrade.sql, and a [<name>] section in the connection
+file:
   dev:  var/reuter.local.ini with generated credentials (ready to use)
   prod: the active prod reuter file with change_me placeholders for the
         deployment tooling to fill in
@@ -985,12 +1011,15 @@ _cmd_database() {
         exit 1
     fi
     _assert_repo_root
-    local srv_file="srv/${name}.sql"
-    if [[ -f "$srv_file" ]]; then
-        echo "Error: $srv_file already exists" >&2
-        exit 1
+    if ls -d "srv/${name}"-* 1>/dev/null 2>&1; then
+        echo "Error: Database with prefix '$name' already exists in srv/." >&2
+        return 1
     fi
-    cat > "$srv_file" <<SQL_EOF
+    local guid
+    guid=$(_gen_guid D0)
+    local directory_name="${name}-${guid}"
+    mkdir -p "srv/${directory_name}"
+    cat > "srv/${directory_name}/upgrade.sql" <<SQL_EOF
 -- ema database stub for ${name}, consumed by \`ema init db ${name}\`.
 -- Placeholders are filled from the [${name}] section of the connection file
 -- ({{dbname}}, {{servername}}, {{admin_password}}, {{reader_password}}).
@@ -1010,12 +1039,17 @@ CREATE USER 'reader'@'{{servername}}' IDENTIFIED BY '{{reader_password}}';
 GRANT SELECT ON {{dbname}}.* TO 'reader'@'{{servername}}';
 GRANT SELECT, INSERT, UPDATE, DELETE ON {{dbname}}.* TO 'admin'@'{{servername}}';
 SQL_EOF
+    cat <<EOD > "srv/${directory_name}/default.php"
+<?php
+\$dependencies = array();
+?>
+EOD
     if [ "${EMA_MODE:-dev}" = "dev" ]; then
         _ensure_local_section "$name"
-        echo "Created $srv_file (+ section [$name] in var/reuter.local.ini)"
+        echo "Created srv/${directory_name} (+ section [$name] in var/reuter.local.ini)"
     else
         _ensure_prod_section "$name" || exit 1
-        echo "Created $srv_file (+ section [$name] in $(_reuter_file))"
+        echo "Created srv/${directory_name} (+ section [$name] in $(_reuter_file))"
     fi
 }
 

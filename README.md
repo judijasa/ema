@@ -50,8 +50,8 @@ Schema packages:
 | Command | Purpose |
 |---|---|
 | `ema schema <name>` | Create a new schema package in `pkg/` |
-| `ema database <name>` | Create an `srv/<name>.sql` stub + `[<name>]` section |
-| `ema init db <name>` | Create database, users, and grants (reads `srv/<name>.sql`) |
+| `ema database <name>` | Create an `srv/<name>-<GUID>/` package + `[<name>]` section |
+| `ema init db <name>` | Create database, users, and grants (reads `srv/<name>-<GUID>/`) |
 | `ema init tables <root-pkg> <db>` | Apply all schema packages in topological order |
 | `ema inspect <root-pkg>` | Show the schema dependency graph (wrapper over `src/sort_schemas.php`) |
 | `ema deps <root-pkg>` | List schema packages in topological order |
