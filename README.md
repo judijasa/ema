@@ -23,10 +23,14 @@ reads `.env` itself, so the running shell needs it in scope
 (`set -a; . .env`).
 
 Each sandbox owns its MariaDB instance (its own datadir/socket/pid/port under
-`var/sandbox/<name>-<guid>/`). This makes the "one db per instance" rule
-structural: MariaDB users/roles are instance-level, so the per-database
-bootstrap (`DROP/CREATE USER … @'{{servername}}'`) is only safe when the
-instance holds exactly one database.
+`var/sandbox/<name>-<guid>/`), which keeps disposable databases isolated —
+recreating a sandbox can never collide with pre-existing instance state. ema
+provisions **schema only**: its bootstrap emits database DDL (create the
+database with its charset/collation) and applies schema-package dependencies;
+it never creates users or grants. User and service-account provisioning is
+consumer policy and runs as a separate operation in the consumer's own repo.
+Sandboxes are create-only: `ema sandbox <target>` refuses when the instance
+already exists (`ema drop` first, then rebuild).
 
 Connections use the selected section's `MYSQL_UNIX_PORT` (local socket) when
 the section defines it, otherwise `SERVER`/`PORT` (TCP). The section is
@@ -42,30 +46,27 @@ just whatever `SERVER` resolves to).
 ### The `srv/<name>-<GUID>/default.php` definition
 
 A database package's `default.php` carries the **default** definition — the
-dbname, charset/collation, `servername`, and the `admin`/`reader` users with
-their grants — plus its schema-package `$dependencies`. The connection file
-overrides the machine-local parts (endpoint + secrets); `default.php` holds
-the shape and non-secret defaults so dev and prod share one emit path.
-Passwords are instance-generated and never live in `default.php`.
+dbname and charset/collation plus its schema-package `$dependencies`. Dev and
+prod share one emit path: `ema sandbox srv/<name>-<GUID>` (dev) and
+`ema create srv/<name>-<GUID>` (prod) both read the same default; the
+connection file (`REUTER_INI` / `etc/reuter.ini`, or the per-instance
+`var/sandbox/.../reuter.ini`) supplies the machine-local endpoint. There are
+no secrets in ema: `default.php` holds no passwords, and the connection file
+carries endpoint keys only.
 
 ```php
 $db = array(
     'dbname' => 'test',
     'charset' => 'utf8',
     'collation' => 'utf8_spanish_ci',
-    'servername' => 'localhost',
-    'users' => array(
-        'admin'  => 'SELECT, INSERT, UPDATE, DELETE',
-        'reader' => 'SELECT',
-    ),
 );
 $dependencies = array('demo-1F2E3D4C5B6A7980');
 ```
 
-The sibling `upgrade.sql` is the bootstrap (create database + users + grants),
-with `{{dbname}}`/`{{charset}}`/`{{collation}}`/`{{servername}}`/
-`{{admin_password}}`/`{{reader_password}}` placeholders filled from
-`default.php` defaults + instance-generated secrets.
+The sibling `upgrade.sql` is the database bootstrap, with
+`{{dbname}}`/`{{charset}}`/`{{collation}}` placeholders filled from
+`default.php` defaults. Schema only — users/grants are consumer policy and
+never appear in a database package.
 
 ## Command reference
 
@@ -73,8 +74,9 @@ Shell and database lifecycle (each sandbox owns its instance under `var/sandbox/
 
 | Command | Purpose |
 |---|---|
-| `ema sandbox srv/<name>-<GUID>` | Build/reapply a per-instance sandbox for a database package |
-| `ema sandbox pkg/<pkg>-<GUID>` | Build/reapply a sandbox for a schema package (synthesized db) |
+| `ema sandbox srv/<name>-<GUID>` | Build a disposable per-instance sandbox for a database package (dev) |
+| `ema sandbox pkg/<pkg>-<GUID>` | Build a disposable sandbox for a schema package (synthesized db) |
+| `ema create srv/<name>-<GUID>` | Create a prod database from a database package (schema only, `EMA_TARGET=prod`) |
 | `ema mariadb <db> [args...]` | Open a MariaDB shell against a database's section |
 | `ema start` / `ema stop` / `ema restart` | Start/stop/restart sandbox instance(s) (sandbox only) |
 | `ema status` | List instances/sections: up/down, endpoint, age |
@@ -97,16 +99,22 @@ flags bundle (`-nq`).
 
 ## Lifecycle & destruction safety
 
-`ema sandbox` builds (or reapplies) a sandbox and then opens a shell
+`ema sandbox` builds a disposable sandbox and then opens a shell
 (`ema mariadb <db>`); pass `-n/--no-shell` to print the command instead.
 Non-terminal stdin (pipes, CI) always prints the command, so scripts never
 block. Raw SQL over a built sandbox uses stdin redirection —
 `ema mariadb <db> < file.sql` — there is no dedicated `apply` verb.
 
-The destructive bootstrap (create instance + database + users + grants) runs
-only on the **first build**. Re-running `ema sandbox <target>` against an
-existing instance is non-destructive: bootstrap is skipped and the dependency
-graph's `upgrade.sql` is reapplied in topological order — never `DROP`.
+Both creation verbs are **create-only**: the destructive bootstrap (create
+instance + database) runs once, and re-running against an existing target
+refuses — `ema drop` first, then recreate. `ema sandbox <target>` refuses
+when the sandbox instance already exists; `ema create srv/<name>-<GUID>` is
+the prod counterpart, refused under a sandbox target (`EMA_TARGET=prod`) and
+refused when the database already exists (checked via
+`information_schema.SCHEMATA`). `ema create --dry-run` prints the SQL that
+would run (bootstrap + dependency graph in topological order) without running
+it. There is no upgrade/reapply surface by design: change a database with
+imperative SQL or delete + recreate.
 
 Destructive operations follow a safety ladder:
 

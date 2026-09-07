@@ -18,8 +18,9 @@ show_help() {
 Usage: $PROGRAM_NAME <command> [arguments]
 
 Database lifecycle & shell:
-  sandbox srv/<name>-<GUID>   Build/reapply a per-instance sandbox for a database
-  sandbox pkg/<pkg>-<GUID>    Build/reapply a sandbox for a schema package
+  create srv/<name>-<GUID>    Create a prod database (schema only, EMA_TARGET=prod)
+  sandbox srv/<name>-<GUID>   Build a disposable per-instance sandbox (create-only)
+  sandbox pkg/<pkg>-<GUID>    Build a disposable sandbox for a schema package
   mariadb <db> [args...]      Open a MariaDB shell against a database's section
   start [<name>-<GUID>]       Start sandbox instance(s) (var/sandbox)
   stop [<name>-<GUID>]        Stop sandbox instance(s)
@@ -175,7 +176,7 @@ _load_target() {
     # The section is authoritative: clear any ambient connection vars first so
     # an exported value (e.g. MYSQL_UNIX_PORT from the dev shell) cannot leak
     # into a section that does not define it.
-    unset SERVER PORT DBNAME DBMS ADMIN_PASSWORD READER_PASSWORD MYSQL_UNIX_PORT
+    unset SERVER PORT DBNAME DBMS MYSQL_UNIX_PORT
     eval "$vars"
 }
 
@@ -477,10 +478,6 @@ _cmd_mariadb() {
     exec "$DBMS" -u "$_db_user" "${_MARIADB_ARGS[@]}" "${_args[@]}"
 }
 
-_gen_password() {
-    tr -dc 'A-Za-z0-9' < /dev/urandom | fold -w 24 | head -n 1
-}
-
 # <prefix> + 14 random base36 chars -- schematic's type-prefixed GUID
 # convention (16 chars total). The prefix maps a package to its kind: S0 for
 # schema packages (pkg/), D0 for database packages (srv/).
@@ -501,10 +498,10 @@ _srv_definition() {
 }
 
 # Write the per-instance var/sandbox/<key>/reuter.ini with a [<dbname>]
-# section. Written only on first build; reapply reuses the file so the
-# instance-generated secrets stay stable across re-runs.
+# section (endpoint keys only — ema creates schema, never users/passwords).
+# Written once on build; instances are create-only (drop first to rebuild).
 _write_sandbox_ini() {
-    local key="$1" dbname="$2" admin_pw="$3" reader_pw="$4"
+    local key="$1" dbname="$2"
     local ini
     ini="$(_sandbox_ini "$key")"
     mkdir -p "$(dirname "$ini")"
@@ -517,8 +514,6 @@ PORT=0
 DBMS=mariadb
 DBNAME=$dbname
 MYSQL_UNIX_PORT=$(_sandbox_sock "$key")
-ADMIN_PASSWORD=$admin_pw
-READER_PASSWORD=$reader_pw
 EOF
 }
 
@@ -537,9 +532,20 @@ _run_root_sql() {
     fi
 }
 
+# True when database <dbname> exists on the resolved connection
+# (information_schema.SCHEMATA). Called after _load_target + _mariadb_args;
+# 'ema create' refuses when this is true (create-only). SELECT only.
+_prod_database_exists() {
+    local dbname="$1" out
+    local sql="SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '${dbname}';"
+    out=$("$DBMS" -N -u root "${_MARIADB_ARGS[@]}" -e "$sql" 2>/dev/null) || \
+        out=$(sudo env PATH="$PATH" MYSQL_UNIX_PORT="${MYSQL_UNIX_PORT:-}" "$DBMS" -N -u root "${_MARIADB_ARGS[@]}" -e "$sql")
+    [[ -n "$out" ]]
+}
+
 # Shared streaming primitive: topo-sort the package graph rooted at
 # root_pkgs..., concatenate each package's upgrade.sql, wrap it in FK guards,
-# and fill {{dbname}}/{{servername}} — writing the result to <outfile>.
+# and fill {{dbname}} — writing the result to <outfile>.
 _build_schema_sql() {
     local dbname="$1" outfile="$2"
     shift 2
@@ -572,7 +578,7 @@ _build_schema_sql() {
         fi
     done
     { echo "SET FOREIGN_KEY_CHECKS=0;"; \
-      sed "s/{{dbname}}/${dbname}/g; s/{{servername}}/${SERVER}/g;" "$pseudo_sql"; \
+      sed "s/{{dbname}}/${dbname}/g;" "$pseudo_sql"; \
       echo "SET FOREIGN_KEY_CHECKS=1;"; } > "$outfile"
     rm -r "$workdir"
 }
@@ -591,34 +597,30 @@ _apply_pkg_graph() {
 }
 
 # Build the srv bootstrap SQL into <outfile>: read srv/<name>-<GUID>/upgrade.sql
-# and fill {{dbname}}/{{charset}}/{{collation}}/{{servername}} from default.php
-# defaults plus {{admin_password}}/{{reader_password}} from instance-generated
-# secrets.
+# and fill {{dbname}}/{{charset}}/{{collation}} from default.php defaults.
+# Database DDL only — users/grants are consumer policy and never emitted.
 _build_srv_bootstrap_sql() {
-    local srv_dir="$1" outfile="$2" admin_pw="$3" reader_pw="$4"
-    local defs dbname charset collation servername
+    local srv_dir="$1" outfile="$2"
+    local defs dbname charset collation
     defs=$(php -r "
         require '${srv_dir}/default.php';
         echo json_encode(array(
             'dbname' => \$db['dbname'] ?? '',
             'charset' => \$db['charset'] ?? 'utf8',
             'collation' => \$db['collation'] ?? 'utf8_spanish_ci',
-            'servername' => \$db['servername'] ?? 'localhost',
         ));
     ") || exit 1
     dbname=$(echo "$defs" | jq -r '.dbname')
     charset=$(echo "$defs" | jq -r '.charset')
     collation=$(echo "$defs" | jq -r '.collation')
-    servername=$(echo "$defs" | jq -r '.servername')
-    sed "s/{{dbname}}/${dbname}/g; s/{{charset}}/${charset}/g; s/{{collation}}/${collation}/g; s/{{servername}}/${servername}/g; s/{{admin_password}}/${admin_pw}/g; s/{{reader_password}}/${reader_pw}/g;" \
+    sed "s/{{dbname}}/${dbname}/g; s/{{charset}}/${charset}/g; s/{{collation}}/${collation}/g;" \
         "${srv_dir}/upgrade.sql" > "$outfile"
 }
 
 # Synthesize the bootstrap SQL for a pkg/ sandbox (no srv package): a default
-# database + admin/reader users + grants, filled from synthesized defaults and
-# instance-generated secrets.
+# database (charset/collation defaults). Database DDL only.
 _build_synth_bootstrap_sql() {
-    local dbname="$1" charset="$2" collation="$3" servername="$4" admin_pw="$5" reader_pw="$6" outfile="$7"
+    local dbname="$1" charset="$2" collation="$3" outfile="$4"
     cat > "$outfile" <<EOF
 SET check_constraint_checks = OFF;
 DROP DATABASE IF EXISTS ${dbname};
@@ -626,12 +628,6 @@ CREATE OR REPLACE DATABASE ${dbname}
 COMMENT 'ema ${dbname} database'
 CHARACTER SET = '${charset}'
 COLLATE = '${collation}';
-DROP USER IF EXISTS 'admin'@'${servername}';
-CREATE USER 'admin'@'${servername}' IDENTIFIED BY '${admin_pw}';
-DROP USER IF EXISTS 'reader'@'${servername}';
-CREATE USER 'reader'@'${servername}' IDENTIFIED BY '${reader_pw}';
-GRANT SELECT ON ${dbname}.* TO 'reader'@'${servername}';
-GRANT SELECT, INSERT, UPDATE, DELETE ON ${dbname}.* TO 'admin'@'${servername}';
 EOF
 }
 
@@ -651,23 +647,118 @@ _maybe_open_shell() {
     fi
 }
 
+# --- prod database creation (EMA_TARGET=prod) -------------------------------
+
+_help_create() {
+    cat <<'HELP'
+Usage: ema create srv/<name>-<GUID> [flags]
+
+Create a prod database from a database package: provision the database
+(dbname/charset/collation) and apply the schema-package dependency graph in
+topological order. Schema only — users/grants are consumer policy and are
+never created by ema.
+
+Prod-only: refuses under sandbox (build one with 'ema sandbox
+srv/<name>-<GUID>'). Create-only: refuses when the database already exists
+('ema drop <db>' deletes it first). There is no reapply/upgrade surface —
+change a database with imperative SQL or delete + recreate.
+
+Flags:
+  --dry-run         Print the SQL that would run, without running it
+  -q, --quiet       Suppress non-error output
+  -v, --verbose     Print the action to stderr
+HELP
+}
+
+_cmd_create() {
+    if _is_help "$@"; then
+        _help_create
+        return
+    fi
+    _parse_flags "--dry-run -q --quiet -v --verbose" "" "$@"
+    local target="${_POS_ARGS[0]:-}"
+    if [[ -z "$target" ]]; then
+        echo "Error: must provide a target (e.g., ema create srv/<name>-<GUID>)" >&2
+        _help_create
+        exit 1
+    fi
+    _assert_repo_root
+    if _is_sandbox; then
+        echo "Error: 'ema create' is prod-only — run 'ema sandbox $target' to build a sandbox instance" >&2
+        exit 1
+    fi
+    if [[ "$target" != srv/* ]]; then
+        echo "Error: target must be srv/<name>-<GUID> (got '$target')" >&2
+        _help_create
+        exit 1
+    fi
+    local dry_run quiet verbose
+    dry_run=$(_get_flag --dry-run dry_run)
+    quiet=$(_get_flag --quiet -q quiet)
+    verbose=$(_get_flag --verbose -v verbose)
+    local ref defs dbname srv_dir deps_json
+    local -a deps=()
+    ref="${target#srv/}"
+    defs="$(_srv_definition "$ref")" || exit 1
+    dbname=$(echo "$defs" | jq -r '.db.dbname')
+    if [[ -z "$dbname" || "$dbname" == "null" ]]; then
+        echo "Error: srv/$ref/default.php has no \$db definition (dbname required)" >&2
+        exit 1
+    fi
+    srv_dir=$(echo "$defs" | jq -r '.dir')
+    deps_json=$(echo "$defs" | jq -c '.dependencies')
+    mapfile -t deps < <(echo "$deps_json" | jq -r '.[]')
+    # Resolve the prod [<dbname>] section; refuse when the database exists.
+    _load_target "$dbname"
+    _mariadb_args
+    if _prod_database_exists "$dbname"; then
+        echo "Error: database '$dbname' already exists — ema create is create-only (run 'ema drop $dbname --force' first)" >&2
+        exit 1
+    fi
+    local workdir bootstrap_sql apply_sql has_deps="no"
+    workdir=$(mktemp -d /tmp/ema_create_XXXXXX)
+    bootstrap_sql="${workdir}/bootstrap.sql"
+    _build_srv_bootstrap_sql "$srv_dir" "$bootstrap_sql"
+    if [[ "${#deps[@]}" -gt 0 ]]; then
+        has_deps="yes"
+        apply_sql="${workdir}/apply.sql"
+        _build_schema_sql "$dbname" "$apply_sql" "${deps[@]}" || { rm -r "$workdir"; exit 1; }
+    fi
+    if [[ "$dry_run" == "yes" ]]; then
+        cat "$bootstrap_sql"
+        if [[ "$has_deps" == "yes" ]]; then
+            cat "$apply_sql"
+        fi
+        rm -r "$workdir"
+        return
+    fi
+    [[ "$verbose" == "yes" ]] && echo "Creating database: $dbname" >&2
+    _run_root_sql "" "$bootstrap_sql"
+    if [[ "$has_deps" == "yes" ]]; then
+        _run_root_sql "$dbname" "$apply_sql"
+    fi
+    rm -r "$workdir"
+    [[ "$quiet" == "no" ]] && echo "Created database: $dbname"
+}
+
 _help_sandbox() {
     cat <<'HELP'
 Usage: ema sandbox <target> [flags]
 
-Build (or reapply) a per-instance sandbox for a database or schema package.
+Build a disposable per-instance sandbox for a database or schema package.
 Each sandbox owns its MariaDB instance (datadir/socket/pid under
 var/sandbox/<name>-<guid>/).
 
 Targets:
-  srv/<name>-<GUID>   Build instance + bootstrap (create db/users/grants) +
-                      apply the schema-package deps in topological order.
+  srv/<name>-<GUID>   Create the instance + database (bootstrap from the srv
+                      package's upgrade.sql) + apply the schema-package deps
+                      in topological order.
   pkg/<pkg>-<GUID>    Synthesize a default database (zero deps) and apply the
                       pkg's dependency graph.
 
-First build runs the destructive bootstrap (create instance + database +
-users + grants). Re-running against an existing instance is non-destructive:
-bootstrap is skipped and the dependency graph is reapplied (never DROP).
+Create-only: re-running against an existing instance refuses ("already built
+— 'ema drop' first"). Schema only — users/grants are consumer policy and are
+never created by ema.
 
 Flags:
   -n, --no-shell      Print 'ema mariadb <db>' instead of opening the shell
@@ -699,7 +790,7 @@ _cmd_sandbox() {
     fi
 }
 
-# Build/reapply a sandbox for an srv/<name>-<GUID> database package.
+# Build a sandbox for an srv/<name>-<GUID> database package.
 _sandbox_srv() {
     local target="$1" ref defs dbname srv_dir deps_json key
     ref="${target#srv/}"
@@ -717,7 +808,7 @@ _sandbox_srv() {
     _sandbox_build "$key" "$dbname" "$srv_dir" "${deps[@]}"
 }
 
-# Build/reapply a sandbox for a pkg/<pkg>-<GUID> schema package.
+# Build a sandbox for a pkg/<pkg>-<GUID> schema package.
 _sandbox_pkg() {
     local target="$1" key dbname
     key="$(_instance_key "$target")"
@@ -725,44 +816,41 @@ _sandbox_pkg() {
     _sandbox_build "$key" "$dbname" "" "$key"
 }
 
-# Shared sandbox build/reapply driver. <srv_dir> is the srv/ package dir for a
-# database sandbox (bootstrap read from its upgrade.sql), or "" to synthesize a
-# default bootstrap. <deps> are the schema-package graph roots.
+# Shared sandbox build driver (create-only). <srv_dir> is the srv/ package
+# dir for a database sandbox (bootstrap read from its upgrade.sql), or "" to
+# synthesize a default bootstrap. <deps> are the schema-package graph roots.
+# Refuses when the instance already exists: sandboxes are disposable — drop
+# first, then rebuild.
 _sandbox_build() {
     local key="$1" dbname="$2" srv_dir="$3"
     shift 3
     local deps=("$@")
-    local datadir admin_pw reader_pw workdir sql first="no"
+    local datadir workdir sql
     datadir="$(_sandbox_data "$key")"
-    if [[ ! -d "$datadir" ]]; then
-        first="yes"
+    if [[ -d "$datadir" ]]; then
+        echo "Error: sandbox '$key' already built — ema sandbox is create-only (run 'ema drop $key' first)" >&2
+        exit 1
     fi
-    if [[ "$first" == "yes" ]]; then
-        admin_pw="$(_gen_password)"
-        reader_pw="$(_gen_password)"
-        mkdir -p "$(_sandbox_dir "$key")"
-        _write_sandbox_ini "$key" "$dbname" "$admin_pw" "$reader_pw"
-        mkdir -p "$datadir"
-        if ! mariadb-install-db --auth-root-authentication-method=normal --skip-test-db \
-                --datadir="$PWD/$datadir" --pid-file="$PWD/$(_sandbox_pid "$key")" >/dev/null 2>&1; then
-            echo "Error: mariadb-install-db failed for '$key'" >&2
-            exit 1
-        fi
+    mkdir -p "$(_sandbox_dir "$key")"
+    _write_sandbox_ini "$key" "$dbname"
+    mkdir -p "$datadir"
+    if ! mariadb-install-db --auth-root-authentication-method=normal --skip-test-db \
+            --datadir="$PWD/$datadir" --pid-file="$PWD/$(_sandbox_pid "$key")" >/dev/null 2>&1; then
+        echo "Error: mariadb-install-db failed for '$key'" >&2
+        exit 1
     fi
     _sandbox_start "$key" "yes" || exit 1
     _load_target "$dbname"
     _mariadb_args
-    if [[ "$first" == "yes" ]]; then
-        workdir=$(mktemp -d /tmp/ema_bootstrap_XXXXXX)
-        sql="${workdir}/bootstrap.sql"
-        if [[ -n "$srv_dir" ]]; then
-            _build_srv_bootstrap_sql "$srv_dir" "$sql" "$admin_pw" "$reader_pw"
-        else
-            _build_synth_bootstrap_sql "$dbname" "utf8" "utf8_spanish_ci" "localhost" "$admin_pw" "$reader_pw" "$sql"
-        fi
-        _run_root_sql "" "$sql"
-        rm -r "$workdir"
+    workdir=$(mktemp -d /tmp/ema_bootstrap_XXXXXX)
+    sql="${workdir}/bootstrap.sql"
+    if [[ -n "$srv_dir" ]]; then
+        _build_srv_bootstrap_sql "$srv_dir" "$sql"
+    else
+        _build_synth_bootstrap_sql "$dbname" "utf8" "utf8_spanish_ci" "$sql"
     fi
+    _run_root_sql "" "$sql"
+    rm -r "$workdir"
     if [[ "${#deps[@]}" -gt 0 ]]; then
         _apply_pkg_graph "$dbname" "${deps[@]}"
     fi
@@ -1114,11 +1202,12 @@ _help_database() {
     cat <<'HELP'
 Usage: ema database <name>
 
-Create a database package srv/<name>-<GUID>/ (default.php + upgrade.sql). The
-default.php carries the default definition (dbname, charset/collation, users,
-grants); upgrade.sql is the bootstrap with {{dbname}}/{{charset}}/{{collation}}/
-{{servername}}/{{admin_password}}/{{reader_password}} placeholders filled by
-'ema sandbox srv/<name>-<GUID>' from default.php + instance-generated secrets.
+Create a database package srv/<name>-<GUID>/ (default.php + upgrade.sql).
+default.php carries the default definition (dbname, charset/collation);
+upgrade.sql is the database bootstrap with {{dbname}}/{{charset}}/{{collation}}
+placeholders filled from default.php by 'ema sandbox srv/<name>-<GUID>' (dev)
+and 'ema create srv/<name>-<GUID>' (prod). Schema only — users/grants are
+consumer policy and never part of a database package.
 HELP
 }
 
@@ -1144,41 +1233,25 @@ _cmd_database() {
     mkdir -p "srv/${directory_name}"
     cat > "srv/${directory_name}/upgrade.sql" <<SQL_EOF
 -- ema database bootstrap for ${name}, consumed by
--- \`ema sandbox srv/${directory_name}\`. Placeholders are filled from
--- default.php defaults + instance-generated secrets:
--- {{dbname}}, {{charset}}, {{collation}}, {{servername}},
--- {{admin_password}}, {{reader_password}}.
+-- \`ema sandbox srv/${directory_name}\` (dev) and
+-- \`ema create srv/${directory_name}\` (prod). Placeholders are filled from
+-- default.php defaults: {{dbname}}, {{charset}}, {{collation}}.
 SET check_constraint_checks = OFF;
 DROP DATABASE IF EXISTS {{dbname}};
 CREATE OR REPLACE DATABASE {{dbname}}
 COMMENT 'ema ${name} database'
 CHARACTER SET = '{{charset}}'
 COLLATE = '{{collation}}';
-
-DROP USER IF EXISTS 'admin'@'{{servername}}';
-CREATE USER 'admin'@'{{servername}}' IDENTIFIED BY '{{admin_password}}';
-
-DROP USER IF EXISTS 'reader'@'{{servername}}';
-CREATE USER 'reader'@'{{servername}}' IDENTIFIED BY '{{reader_password}}';
-
-GRANT SELECT ON {{dbname}}.* TO 'reader'@'{{servername}}';
-GRANT SELECT, INSERT, UPDATE, DELETE ON {{dbname}}.* TO 'admin'@'{{servername}}';
 SQL_EOF
     cat <<EOD > "srv/${directory_name}/default.php"
 <?php
-// Default database definition for ${name}. Overridable by the connection file
-// (endpoint + secrets); this file carries the shape and non-secret defaults so
-// dev and prod share one emit path. Passwords are instance-generated and never
-// live here.
+// Default database definition for ${name}. Non-secret defaults shared by dev
+// and prod (the connection file carries the endpoint). ema creates schema
+// only — users/grants are consumer policy and never live here.
 \$db = array(
     'dbname' => '${name}',
     'charset' => 'utf8',
     'collation' => 'utf8_spanish_ci',
-    'servername' => 'localhost',
-    'users' => array(
-        'admin'  => 'SELECT, INSERT, UPDATE, DELETE',
-        'reader' => 'SELECT',
-    ),
 );
 // Schema packages this database applies (pkg/<name>-<GUID>), dependency order.
 \$dependencies = array();
@@ -1267,6 +1340,10 @@ case "$1" in
     sandbox)
         shift
         _cmd_sandbox "$@"
+        ;;
+    create)
+        shift
+        _cmd_create "$@"
         ;;
     drop)
         shift

@@ -15,6 +15,4 @@
 SERVER=10.147.x.x
 PORT=3306
 DBMS=mariadb
-ADMIN_PASSWORD=change_me
-READER_PASSWORD=change_me
 MYSQL_UNIX_PORT=/path/to/mysql.sock

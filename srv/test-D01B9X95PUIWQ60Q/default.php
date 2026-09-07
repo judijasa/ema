@@ -1,17 +1,11 @@
 <?php
-// Default database definition for `test`. Overridable by the connection file
-// (endpoint + secrets); this file carries the shape and non-secret defaults so
-// dev and prod share one emit path. Passwords are instance-generated and never
-// live here.
+// Default database definition for `test`. Non-secret defaults shared by dev
+// and prod (the connection file carries the endpoint). ema creates schema
+// only — users/grants are consumer policy and never live here.
 $db = array(
     'dbname' => 'test',
     'charset' => 'utf8',
     'collation' => 'utf8_spanish_ci',
-    'servername' => 'localhost',
-    'users' => array(
-        'admin'  => 'SELECT, INSERT, UPDATE, DELETE',
-        'reader' => 'SELECT',
-    ),
 );
 // Schema packages this database applies (pkg/<name>-<GUID>), dependency order.
 $dependencies = array(
