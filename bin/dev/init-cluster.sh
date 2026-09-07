@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Initialize the local, isolated MariaDB cluster used by the dev sandbox and
-# start its daemon if the data dir is empty.
+# Initialize the local, isolated MariaDB cluster used by the dev sandbox.
+# Initializes the data directory only — it does NOT start the daemon
+# (instances are started by 'ema sandbox' when a database is built).
 # Backend for the Makefile target _dev-init-cluster (make dev-init).
 # Owned by ema and shipped via Composer (composer.json `bin`) so consumers
 # call it from PATH (vendor/bin/init-cluster.sh) instead of keeping
@@ -12,14 +13,12 @@ set -euo pipefail
 
 DB_DATA_DIR="$1"
 DB_PID_FILE="$2"
-DB_UNIX_SOCKET="$3"
+DB_UNIX_SOCKET="$3"   # reserved: the daemon is started later by 'ema sandbox'
 
 echo "Initializing raw MariaDB cluster structures..."
 if [ ! -d "$DB_DATA_DIR" ]; then
     # No --basedir: The binary auto-detects its compiled-in prefix
     mariadb-install-db --auth-root-authentication-method=normal --datadir="$DB_DATA_DIR" --pid-file="$DB_PID_FILE" > /dev/null 2>&1
-    echo "    Starting MariaDB daemon..."
-    mysqld --datadir="$DB_DATA_DIR" --pid-file="$DB_PID_FILE" --socket="$DB_UNIX_SOCKET" --skip-networking > /dev/null 2>&1 &
 else
     echo "    MariaDB cluster already initialized. Skipping."
 fi

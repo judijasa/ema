@@ -10,37 +10,29 @@ class Graph {
         array_push($this->adjacency_list[$source], $destination);
     }
 
+    // Dependencies-first topological order over every node in the graph.
+    // Edges point source -> destination where "source depends on destination",
+    // so a dependency is emitted before its dependents.
     public function topological_sort() {
         $visited = array();
-        $stack = new SplStack();
-
-        foreach ($this->adjacency_list as $node => $neighbors) {
-            if (!isset($visited[$node])) {
-                $this->dfs_topological_sort($node, $visited, $stack);
-            }
+        $order = array();
+        foreach (array_keys($this->adjacency_list) as $node) {
+            $this->dfs_topological_sort($node, $visited, $order);
         }
-
-        $result = array();
-        while (!$stack->isEmpty()) {
-            $result[] = $stack->pop();
-        }
-        unset($result[0]); // remove root schema from output
-        $result = array_values($result);
-        $result = array_reverse($result);
-
-        return $result;
+        return $order;
     }
 
-    private function dfs_topological_sort($node, &$visited, &$stack) {
+    private function dfs_topological_sort($node, &$visited, &$order) {
+        if (isset($visited[$node])) {
+            return;
+        }
         $visited[$node] = true;
         if (isset($this->adjacency_list[$node])) {
             foreach ($this->adjacency_list[$node] as $neighbor) {
-                if (!isset($visited[$neighbor])) {
-                    $this->dfs_topological_sort($neighbor, $visited, $stack);
-                }
+                $this->dfs_topological_sort($neighbor, $visited, $order);
             }
         }
-        $stack->push($node);
+        $order[] = $node;
     }
 }
 
@@ -96,6 +88,30 @@ function find_package($schema) {
     return null;
 }
 
+// find_srv_package(): locate an srv/<name>-<GUID>/ database package under the
+// consumer's own srv/ directory, or return null. Database packages are the
+// consumer's own data -- they are not shipped via Composer the way pkg/
+// schema packages are, so the lookup is local-only (no multi-provider roots).
+function find_srv_package($target) {
+    $dir = 'srv/' . $target;
+    return is_dir($dir) ? realpath($dir) : null;
+}
+
+// srv_definition(): load srv/<name>-<GUID>/default.php and return its default
+// database definition ($db) and schema-package dependencies ($dependencies).
+// $db is null when the file is the legacy shape (dependencies only).
+function srv_definition($target) {
+    $dir = find_srv_package($target);
+    if ($dir === null) {
+        fwrite(STDERR, "Error: srv package '$target' not found under srv/\n");
+        exit(1);
+    }
+    $db = null;
+    $dependencies = array();
+    require $dir . '/default.php';
+    return array('dir' => $dir, 'db' => $db, 'dependencies' => $dependencies);
+}
+
 function extract_dependencies($schema) {
     $dir = find_package($schema);
     if ($dir === null) {
@@ -106,11 +122,16 @@ function extract_dependencies($schema) {
     return $dependencies;
 }
 
-function build_dependency_graph($root_schema) {
+// build_dependency_graph_roots(): build the graph over one or more root schema
+// packages, registering every visited node (even dependency-free leaves) so the
+// topological sort covers all of them.
+function build_dependency_graph_roots($root_schemas) {
     $graph = new Graph();
     $visited = array();
     $stack = new SplStack();
-    $stack->push($root_schema);
+    foreach ($root_schemas as $root_schema) {
+        $stack->push($root_schema);
+    }
 
     while (!$stack->isEmpty()) {
         $current_schema = $stack->pop();
@@ -118,6 +139,9 @@ function build_dependency_graph($root_schema) {
             continue;
         }
         $visited[$current_schema] = true;
+        if (!isset($graph->adjacency_list[$current_schema])) {
+            $graph->adjacency_list[$current_schema] = array();
+        }
         $dependencies = extract_dependencies($current_schema);
         foreach ($dependencies as $dependency) {
             $graph->add_edge($current_schema, $dependency);
@@ -128,6 +152,11 @@ function build_dependency_graph($root_schema) {
     }
 
     return $graph;
+}
+
+// build_dependency_graph(): single-root convenience wrapper.
+function build_dependency_graph($root_schema) {
+    return build_dependency_graph_roots(array($root_schema));
 }
 
 if (!count(debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS))) {
