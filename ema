@@ -18,7 +18,8 @@ show_help() {
 Usage: $PROGRAM_NAME <command> [arguments]
 
 Database lifecycle & shell:
-  create srv/<name>-<GUID>    Create a prod database (schema only, EMA_TARGET=prod)
+  create srv/<name>-<GUID>    Provision the DB instance + create a prod database (EMA_TARGET=prod)
+  values <db>                 Print a prod database's instance connectivity (recovery)
   sandbox srv/<name>-<GUID>   Build a disposable per-instance sandbox (create-only)
   sandbox pkg/<pkg>-<GUID>    Build a disposable sandbox for a schema package
   mariadb <db> [args...]      Open a MariaDB shell against a database's section
@@ -45,6 +46,10 @@ Environment:
   EMA_TARGET             sandbox (default) or prod — binary connection flag
   REUTER_INI             Prod reuter.ini path (used when EMA_TARGET=prod)
   DBUSER                 Default CLI client user for non-local targets (default: \$USER)
+  EMA_PROD_BASE          Prod instance base dir (default: /var/lib/mariadb)
+  EMA_PROD_USER          System user the prod instance runs as (default: mysql)
+  EMA_PROD_BIND          Prod instance bind address (default: 0.0.0.0)
+  EMA_SERVER             SERVER value emitted for prod sections (default: host overlay IP)
   EMA_FORCE/EMA_QUIET/EMA_VERBOSE/EMA_NO_SHELL
                          Env fallbacks for the -f/-q/-v/-n flags
 HELP
@@ -160,7 +165,7 @@ _load_target() {
     local reuter
     reuter="$(_reuter_file "$dbname")"
     if [[ ! -f "$reuter" ]]; then
-        echo "Error: $reuter not found (sandbox: run 'ema sandbox ...'; prod: run gen-reuter)" >&2
+        echo "Error: $reuter not found (sandbox: run 'ema sandbox ...'; prod: record the section from 'ema values <db>')" >&2
         exit 1
     fi
     local vars
@@ -647,16 +652,237 @@ _maybe_open_shell() {
     fi
 }
 
+# --- prod per-database instances --------------------------------------------
+# ema owns prod instance provisioning: one MariaDB instance per database,
+# named after the database. Layout (root-owned; systemd for boot durability):
+#   datadir   = $EMA_PROD_BASE/<db>/data
+#   socket    = $EMA_PROD_BASE/<db>/mysql.sock
+#   pid-file  = $EMA_PROD_BASE/<db>/mysql.pid
+#   log-error = $EMA_PROD_BASE/<db>/mariadb.log
+#   config    = ${EMA_PROD_CONF_DIR:-/etc}/<db>/my.cnf
+#   unit      = mariadb@<db>   (template; --defaults-file=<conf>/%i/my.cnf)
+# The per-instance my.cnf shields the daemon from the global /etc/mysql/
+# includes (which would inject the distro socket/port/pid paths and collide
+# with other instances on the same host). The defaults are overridable for
+# non-Debian layouts and testing.
+_EMA_PROD_BASE="${EMA_PROD_BASE:-/var/lib/mariadb}"
+_prod_data()      { echo "$_EMA_PROD_BASE/$1/data"; }
+_prod_sock()      { echo "$_EMA_PROD_BASE/$1/mysql.sock"; }
+_prod_pid()       { echo "$_EMA_PROD_BASE/$1/mysql.pid"; }
+_prod_log()       { echo "$_EMA_PROD_BASE/$1/mariadb.log"; }
+_prod_conf_base() { echo "${EMA_PROD_CONF_DIR:-/etc}"; }
+_prod_conf_file() { echo "$(_prod_conf_base)/$1/my.cnf"; }
+_prod_unit()      { echo "mariadb@$1"; }
+_prod_user()      { echo "${EMA_PROD_USER:-mysql}"; }
+_prod_bind()      { echo "${EMA_PROD_BIND:-0.0.0.0}"; }
+
+# Pick a free TCP port with a kernel-assigned ephemeral bind (bind to port 0,
+# read the port, release). Inherently racy: the caller re-picks when a start
+# loses the race, and never re-picks a running instance's port.
+_get_free_port() {
+    php -r '
+        $sock = @stream_socket_server("tcp://0.0.0.0:0", $errno, $errstr);
+        if ($sock === false) {
+            fwrite(STDERR, "Error: cannot bind an ephemeral port: $errstr\n");
+            exit(1);
+        }
+        $name = stream_socket_get_name($sock, false);
+        echo substr($name, strrpos($name, ":") + 1);
+        fclose($sock);
+    '
+}
+
+# True when nothing is listening on TCP <port> (a fresh bind succeeds).
+_port_free() {
+    php -r '
+        $sock = @stream_socket_server("tcp://0.0.0.0:" . (int) $argv[1], $errno, $errstr);
+        if ($sock === false) { exit(1); }
+        fclose($sock);
+    ' "$1"
+}
+
+# The address prod sections advertise (SERVER): the host's overlay IP.
+# EMA_SERVER overrides; otherwise the first global IPv4 on a ZeroTier
+# interface (zt*), then the first global IPv4, then localhost.
+_prod_server_addr() {
+    if [[ -n "${EMA_SERVER:-}" ]]; then
+        echo "$EMA_SERVER"
+        return
+    fi
+    local addr=""
+    if command -v ip >/dev/null 2>&1; then
+        addr=$(ip -4 -o addr show scope global 2>/dev/null \
+            | awk '$2 ~ /^zt/ { sub(/\/.*/, "", $4); print $4; exit }')
+        [[ -z "$addr" ]] && addr=$(ip -4 -o addr show scope global 2>/dev/null \
+            | awk 'NR == 1 { sub(/\/.*/, "", $4); print $4 }')
+    fi
+    echo "${addr:-localhost}"
+}
+
+# Read the persisted port from an instance defaults file.
+_prod_conf_port() {
+    awk -F= '/^[[:space:]]*port[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); print $2; exit }' "$1"
+}
+
+# Write the per-instance defaults file (idempotent).
+_prod_write_conf() {
+    local db="$1" port="$2" user="$3" dir
+    dir="$(_prod_conf_base)/$db"
+    mkdir -p "$dir"
+    {
+        echo "[mysqld]"
+        echo "datadir      = $(_prod_data "$db")"
+        echo "socket       = $(_prod_sock "$db")"
+        echo "pid-file     = $(_prod_pid "$db")"
+        echo "log-error    = $(_prod_log "$db")"
+        echo "user         = $user"
+        echo "port         = $port"
+        echo "bind-address = $(_prod_bind)"
+    } > "$(_prod_conf_file "$db")"
+    chmod 644 "$(_prod_conf_file "$db")"
+}
+
+# Install the shared systemd template unit (one file, one unit instance per
+# database; the instance name selects the defaults file).
+_prod_write_unit() {
+    local dir mariadbd
+    dir="${EMA_PROD_SYSTEMD_DIR:-/etc/systemd/system}"
+    mariadbd="$(command -v mariadbd || command -v mysqld || true)"
+    if [[ -z "$mariadbd" ]]; then
+        echo "Error: mariadbd/mysqld not found (install MariaDB server)" >&2
+        exit 1
+    fi
+    mkdir -p "$dir"
+    cat > "$dir/mariadb@.service" <<EOF
+[Unit]
+Description=MariaDB instance %i
+After=network.target
+
+[Service]
+ExecStart=$mariadbd --defaults-file=$(_prod_conf_base)/%i/my.cnf
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# Wait (bounded) until <unit> is active AND accepting TCP on <port>.
+_prod_wait_listening() {
+    local unit="$1" port="$2" i
+    for (( i=0; i<50; i++ )); do
+        if systemctl is-active --quiet "$unit" 2>/dev/null && ! _port_free "$port"; then
+            return 0
+        fi
+        if (( i > 5 )) && ! systemctl is-active --quiet "$unit" 2>/dev/null; then
+            return 1
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+# Ensure the per-database instance exists and is running; sets _PROD_PORT and
+# _PROD_SOCKET. Idempotent: an existing defaults file is authoritative (its
+# port is never re-picked). On first provision the port is auto-picked and the
+# instance is initialized + started; a lost start race re-picks a new port.
+_prod_instance_ensure() {
+    local db="$1" quiet="$2"
+    local datadir conffile unit user attempt port
+    datadir="$(_prod_data "$db")"
+    conffile="$(_prod_conf_file "$db")"
+    unit="$(_prod_unit "$db")"
+    user="$(_prod_user "$db")"
+    _PROD_SOCKET="$(_prod_sock "$db")"
+
+    if ! id -u "$user" >/dev/null 2>&1; then
+        echo "Error: system user '$user' does not exist (override with EMA_PROD_USER)" >&2
+        exit 1
+    fi
+
+    if [[ -f "$conffile" ]]; then
+        _PROD_PORT="$(_prod_conf_port "$conffile")"
+        if [[ -z "$_PROD_PORT" ]]; then
+            echo "Error: no port in $conffile" >&2
+            exit 1
+        fi
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+            [[ "$quiet" == "no" ]] && echo "    Instance $unit already running (port $_PROD_PORT)."
+            return
+        fi
+        [[ "$quiet" == "no" ]] && echo "    Starting instance $unit (port $_PROD_PORT)..."
+        systemctl start "$unit"
+        _prod_wait_listening "$unit" "$_PROD_PORT" || {
+            echo "Error: instance $unit did not accept connections on port $_PROD_PORT" >&2
+            exit 1
+        }
+        return
+    fi
+
+    # First provision: pick a port, initialize the datadir, install the unit.
+    for attempt in 1 2 3; do
+        port="$(_get_free_port)"
+        mkdir -p "$datadir"
+        chown -R "$user:$user" "$_EMA_PROD_BASE/$db"
+        _prod_write_conf "$db" "$port" "$user"
+        if [[ -z "$(ls -A "$datadir" 2>/dev/null)" ]]; then
+            [[ "$quiet" == "no" ]] && echo "    Initializing MariaDB datadir for '$db'..."
+            mariadb-install-db --skip-test-db --user="$user" --datadir="$datadir" >/dev/null 2>&1 || {
+                echo "Error: mariadb-install-db failed for '$db'" >&2
+                exit 1
+            }
+        fi
+        _prod_write_unit
+        systemctl daemon-reload
+        if systemctl enable --now "$unit" 2>/dev/null && _prod_wait_listening "$unit" "$port"; then
+            _PROD_PORT="$port"
+            [[ "$quiet" == "no" ]] && echo "    Instance $unit created (port $port)."
+            return
+        fi
+        # Lost the port race (or the unit failed to start): tear the inactive
+        # unit down and retry with a fresh port. Never re-pick a running
+        # instance's port.
+        echo "Warning: instance $unit did not come up on port $port; retrying with a new port" >&2
+        systemctl stop "$unit" 2>/dev/null || true
+        rm -f "$conffile"
+    done
+    echo "Error: could not start instance $unit after 3 attempts" >&2
+    exit 1
+}
+
+# Print the reuter.ini section shape for a prod database, for the operator to
+# record in the consumer's manual reuter.ini. Used by `create` (on success)
+# and `values` (recovery).
+_prod_print_values() {
+    local db="$1" port="$2" sock="$3"
+    cat <<EOF
+
+Record this section in reuter.ini:
+
+[$db]
+SERVER=$(_prod_server_addr)
+PORT=$port
+DBMS=mariadb
+MYSQL_UNIX_PORT=$sock
+EOF
+}
+
 # --- prod database creation (EMA_TARGET=prod) -------------------------------
 
 _help_create() {
     cat <<'HELP'
 Usage: ema create srv/<name>-<GUID> [flags]
 
-Create a prod database from a database package: provision the database
+Provision a prod database from a database package: ensure the database's own
+MariaDB instance exists and is running (datadir, /etc/<db>/my.cnf, an
+auto-picked TCP port, the mariadb@<db> systemd unit), then create the database
 (dbname/charset/collation) and apply the schema-package dependency graph in
-topological order. Schema only — users/grants are consumer policy and are
-never created by ema.
+topological order. On success the connectivity values (SERVER/PORT/DBMS/
+MYSQL_UNIX_PORT for the [<db>] section) are printed for the operator to record
+in the consumer's manual reuter.ini. Schema only — users/grants are consumer
+policy and are never created by ema.
 
 Prod-only: refuses under sandbox (build one with 'ema sandbox
 srv/<name>-<GUID>'). Create-only: refuses when the database already exists
@@ -664,7 +890,7 @@ srv/<name>-<GUID>'). Create-only: refuses when the database already exists
 change a database with imperative SQL or delete + recreate.
 
 Flags:
-  --dry-run         Print the SQL that would run, without running it
+  --dry-run         Print the SQL that would run, without provisioning or running it
   -q, --quiet       Suppress non-error output
   -v, --verbose     Print the action to stderr
 HELP
@@ -708,13 +934,8 @@ _cmd_create() {
     srv_dir=$(echo "$defs" | jq -r '.dir')
     deps_json=$(echo "$defs" | jq -c '.dependencies')
     mapfile -t deps < <(echo "$deps_json" | jq -r '.[]')
-    # Resolve the prod [<dbname>] section; refuse when the database exists.
-    _load_target "$dbname"
-    _mariadb_args
-    if _prod_database_exists "$dbname"; then
-        echo "Error: database '$dbname' already exists — ema create is create-only (run 'ema drop $dbname --force' first)" >&2
-        exit 1
-    fi
+    # Build the bootstrap + dependency SQL up front (no connection needed), so
+    # --dry-run can print it without provisioning anything.
     local workdir bootstrap_sql apply_sql has_deps="no"
     workdir=$(mktemp -d /tmp/ema_create_XXXXXX)
     bootstrap_sql="${workdir}/bootstrap.sql"
@@ -732,6 +953,19 @@ _cmd_create() {
         rm -r "$workdir"
         return
     fi
+    # Ensure (or reuse) the database's own instance BEFORE creating the
+    # database; ema owns prod instance provisioning, the operator only records
+    # the emitted connectivity values in the consumer's manual reuter.ini.
+    _prod_instance_ensure "$dbname" "$quiet"
+    # Connect as root over the instance's own socket (unix_socket auth); the
+    # consumer's reuter.ini section does not exist yet.
+    MYSQL_UNIX_PORT="$_PROD_SOCKET"
+    _mariadb_args
+    if _prod_database_exists "$dbname"; then
+        rm -r "$workdir"
+        echo "Error: database '$dbname' already exists — ema create is create-only (run 'ema drop $dbname --force' first)" >&2
+        exit 1
+    fi
     [[ "$verbose" == "yes" ]] && echo "Creating database: $dbname" >&2
     _run_root_sql "" "$bootstrap_sql"
     if [[ "$has_deps" == "yes" ]]; then
@@ -739,6 +973,50 @@ _cmd_create() {
     fi
     rm -r "$workdir"
     [[ "$quiet" == "no" ]] && echo "Created database: $dbname"
+    _prod_print_values "$dbname" "$_PROD_PORT" "$_PROD_SOCKET"
+}
+
+_help_values() {
+    cat <<'HELP'
+Usage: ema values <db>
+
+Print the [<db>] connectivity section (SERVER/PORT/DBMS/MYSQL_UNIX_PORT) of an
+existing prod database's instance, for recording in the consumer's manual
+reuter.ini. Recovery helper: the same values `ema create` emits on success.
+
+Prod-only. Errors when no instance exists for <db>.
+HELP
+}
+
+_cmd_values() {
+    if _is_help "$@"; then
+        _help_values
+        return
+    fi
+    _parse_flags "-q --quiet" "" "$@"
+    local db="${_POS_ARGS[0]:-}"
+    if [[ -z "$db" ]]; then
+        echo "Error: must provide a database name (e.g., ema values mydb)" >&2
+        _help_values
+        exit 1
+    fi
+    _assert_repo_root
+    if _is_sandbox; then
+        echo "Error: 'ema values' is prod-only — sandboxes write their own var/sandbox/<name>-<guid>/reuter.ini" >&2
+        exit 1
+    fi
+    local conffile port
+    conffile="$(_prod_conf_file "$db")"
+    if [[ ! -f "$conffile" ]]; then
+        echo "Error: no instance for '$db' ($conffile not found)" >&2
+        exit 1
+    fi
+    port="$(_prod_conf_port "$conffile")"
+    if [[ -z "$port" ]]; then
+        echo "Error: no port in $conffile" >&2
+        exit 1
+    fi
+    _prod_print_values "$db" "$port" "$(_prod_sock "$db")"
 }
 
 _help_sandbox() {
@@ -1344,6 +1622,10 @@ case "$1" in
     create)
         shift
         _cmd_create "$@"
+        ;;
+    values)
+        shift
+        _cmd_values "$@"
         ;;
     drop)
         shift
