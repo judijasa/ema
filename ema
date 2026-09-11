@@ -724,9 +724,24 @@ _prod_conf_port() {
     awk -F= '/^[[:space:]]*port[[:space:]]*=/ { gsub(/[[:space:]]/, "", $2); print $2; exit }' "$1"
 }
 
-# Write the per-instance defaults file (idempotent).
+# A stable, distinct server_id for a replica instance, derived from its name.
+# MariaDB requires every server in a replication topology to carry a unique
+# server_id; ema's primary instances leave the server default (1), so a
+# replica must not collide with it. Deterministic so re-provisioning the same
+# replica name yields the same value.
+_replica_server_id() {
+    local n
+    n=$(php -r 'echo (int)((crc32($argv[1]) % 2147483646) + 1);' "$1")
+    [[ "$n" == "1" ]] && n=2
+    echo "$n"
+}
+
+# Write the per-instance defaults file (idempotent). <extra>, when non-empty,
+# is appended verbatim to the [mysqld] group — used by the replica build to add
+# read_only / replicate-rewrite-db / server_id without a second copy of the
+# whole file.
 _prod_write_conf() {
-    local db="$1" port="$2" user="$3" dir
+    local db="$1" port="$2" user="$3" extra="${4:-}" dir
     dir="$(_prod_conf_base)/$db"
     mkdir -p "$dir"
     {
@@ -738,6 +753,7 @@ _prod_write_conf() {
         echo "user         = $user"
         echo "port         = $port"
         echo "bind-address = $(_prod_bind)"
+        [[ -n "$extra" ]] && printf '%s\n' "$extra"
     } > "$(_prod_conf_file "$db")"
     chmod 644 "$(_prod_conf_file "$db")"
 }
@@ -891,8 +907,17 @@ change a database with imperative SQL or delete + recreate.
 
 Flags:
   --dry-run         Print the SQL that would run, without provisioning or running it
+  --from-snapshot <path>
+                    (replica only) restore this mariabackup backup instead of
+                    applying schema — required for a type=replica package
   -q, --quiet       Suppress non-error output
   -v, --verbose     Print the action to stderr
+
+Replica: a package with $db['type']='replica' and $db['replica_of']=<primary>
+is built from the primary's shipped snapshot (--from-snapshot <path>) and
+attached over the low-priv 'replication' account — schema arrives via
+replication, so no schema packages are applied. See
+doc/system/replica-bootstrap.md for the manual bootstrap.
 HELP
 }
 
@@ -901,7 +926,7 @@ _cmd_create() {
         _help_create
         return
     fi
-    _parse_flags "--dry-run -q --quiet -v --verbose" "" "$@"
+    _parse_flags "--dry-run -q --quiet -v --verbose" "--from-snapshot" "$@"
     local target="${_POS_ARGS[0]:-}"
     if [[ -z "$target" ]]; then
         echo "Error: must provide a target (e.g., ema create srv/<name>-<GUID>)" >&2
@@ -930,6 +955,16 @@ _cmd_create() {
     if [[ -z "$dbname" || "$dbname" == "null" ]]; then
         echo "Error: srv/$ref/default.php has no \$db definition (dbname required)" >&2
         exit 1
+    fi
+    # A replica package (type=replica, replica_of=<primary>) takes the
+    # dedicated local-only build path: restore the primary's shipped snapshot,
+    # then attach over the low-priv `replication` account — no schema apply.
+    local db_type replica_of
+    db_type=$(echo "$defs" | jq -r '.db.type // "primary"')
+    replica_of=$(echo "$defs" | jq -r '.db.replica_of // ""')
+    if [[ "$db_type" == "replica" ]]; then
+        _cmd_create_replica "$dbname" "$replica_of"
+        return
     fi
     srv_dir=$(echo "$defs" | jq -r '.dir')
     deps_json=$(echo "$defs" | jq -c '.dependencies')
@@ -973,6 +1008,186 @@ _cmd_create() {
     fi
     rm -r "$workdir"
     [[ "$quiet" == "no" ]] && echo "Created database: $dbname"
+    _prod_print_values "$dbname" "$_PROD_PORT" "$_PROD_SOCKET"
+}
+
+# Build a read-only replica (type=replica, replica_of=<primary>) from the
+# primary's shipped snapshot. Local-only: it runs on the replica host and never
+# reaches the primary as root — the only primary interaction is reading its
+# `[<primary>]` section for MASTER_HOST/MASTER_PORT; the replica daemon then
+# authenticates over the low-priv `replication` account (created beforehand by
+# the manual bootstrap). Three gates fail loudly:
+#   1. --from-snapshot absent/unreadable  -> abort before provisioning;
+#   2. snapshot carries no binlog file/pos -> abort at restore (the primary was
+#      not replication-ready, or the snapshot is not a mariabackup backup);
+#   3. Slave_IO_Running != Yes after START SLAVE -> abort (missing/mis-pinned
+#      replication account, unreachable primary, or a wrong-source snapshot).
+_cmd_create_replica() {
+    local dbname="$1" replica_of="$2"
+    local from_snapshot dry_run quiet verbose
+    from_snapshot=$(_get_option --from-snapshot)
+    dry_run=$(_get_flag --dry-run dry_run)
+    quiet=$(_get_flag --quiet -q quiet)
+    verbose=$(_get_flag --verbose -v verbose)
+
+    if [[ -z "$replica_of" ]]; then
+        echo "Error: srv package for '$dbname' is type=replica but has no replica_of (primary name required)" >&2
+        exit 1
+    fi
+
+    # Gate 1: the shipped snapshot is a required, explicit input.
+    if [[ -z "$from_snapshot" ]]; then
+        echo "Error: '$dbname' is a replica (type=replica) — 'ema create' requires --from-snapshot <path>" >&2
+        echo "       Run the manual bootstrap first (see doc/system/replica-bootstrap.md)." >&2
+        exit 1
+    fi
+    if [[ ! -d "$from_snapshot" ]]; then
+        echo "Error: --from-snapshot '$from_snapshot' is not a directory (expected a mariabackup backup)" >&2
+        exit 1
+    fi
+
+    # The snapshot records its replication coordinate in mariadb_backup_info
+    # (or xtrabackup_info on older tooling). MariaDB has no server_uuid; the
+    # coordinate is the binlog file + position (file/pos — GTID resume is the
+    # preferred future refinement tracked as an Open item).
+    local snapshot_info snapshot_file snapshot_pos
+    snapshot_info="$from_snapshot/mariadb_backup_info"
+    [[ -f "$snapshot_info" ]] || snapshot_info="$from_snapshot/xtrabackup_info"
+    if [[ ! -f "$snapshot_info" ]]; then
+        echo "Error: '$from_snapshot' is not a mariabackup backup (missing mariadb_backup_info/xtrabackup_info)" >&2
+        exit 1
+    fi
+    snapshot_file=$(sed -n "s/^.*filename '\([^']*\)'.*\$/\1/p" "$snapshot_info")
+    snapshot_pos=$(sed -n "s/^.*position '\([0-9]*\)'.*\$/\1/p" "$snapshot_info")
+
+    # Gate 2: the snapshot must carry a binlog file/pos (a primary with binlog
+    # enabled). A wrong-source snapshot is not detectable here (MariaDB records
+    # no server_uuid); its file/pos simply will not reconcile with the real
+    # primary and is caught by gate 3 below.
+    if [[ -z "$snapshot_file" || -z "$snapshot_pos" ]]; then
+        echo "Error: snapshot '$from_snapshot' records no binlog file/pos — the primary must have binlog enabled" >&2
+        exit 1
+    fi
+
+    # Read the primary's section for the replica's MASTER_* endpoint.
+    _load_target "$replica_of"
+    local master_host="${SERVER:-localhost}" master_port="${PORT:-}"
+    if [[ -z "$master_port" ]]; then
+        echo "Error: primary section '[$replica_of]' has no PORT — replication needs the primary's TCP endpoint" >&2
+        exit 1
+    fi
+
+    if [[ "$dry_run" == "yes" ]]; then
+        cat <<EOF
+Replica build (dry-run):
+  replica:   $dbname
+  primary:   $replica_of
+  snapshot:  $from_snapshot
+  resume:    $snapshot_file:$snapshot_pos
+  read_only: 1
+  rewrite:   $replica_of->$dbname
+  CHANGE MASTER TO MASTER_HOST='$master_host', MASTER_PORT=$master_port, MASTER_USER='replication', MASTER_LOG_FILE='$snapshot_file', MASTER_LOG_POS=$snapshot_pos;
+EOF
+        return
+    fi
+
+    local user datadir conffile unit replica_conf
+    user="$(_prod_user)"
+    if ! id -u "$user" >/dev/null 2>&1; then
+        echo "Error: system user '$user' does not exist (override with EMA_PROD_USER)" >&2
+        exit 1
+    fi
+    conffile="$(_prod_conf_file "$dbname")"
+    if [[ -f "$conffile" ]]; then
+        echo "Error: instance '$dbname' already exists ($conffile present) — ema create is create-only" >&2
+        exit 1
+    fi
+    datadir="$(_prod_data "$dbname")"
+    unit="$(_prod_unit "$dbname")"
+    replica_conf="read_only = 1
+replicate-rewrite-db = $replica_of->$dbname
+server_id = $(_replica_server_id "$dbname")"
+
+    # Prepare the snapshot once (skip when the backup is already prepared:
+    # mariadb_backup_checkpoints' backup_type is 'log-applied').
+    local checkpoints backup_type
+    checkpoints="$from_snapshot/mariadb_backup_checkpoints"
+    [[ -f "$checkpoints" ]] || checkpoints="$from_snapshot/xtrabackup_checkpoints"
+    backup_type=$(awk -F= '/^[[:space:]]*backup_type[[:space:]]*=/{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' "$checkpoints" 2>/dev/null)
+    if [[ "$backup_type" != "log-applied" ]]; then
+        [[ "$verbose" == "yes" ]] && echo "Preparing snapshot: $from_snapshot" >&2
+        mariabackup --prepare --target-dir="$from_snapshot" >/dev/null 2>&1 || {
+            echo "Error: mariabackup --prepare failed for '$from_snapshot'" >&2
+            exit 1
+        }
+    fi
+
+    # Provision the replica instance + restore the snapshot into its (empty)
+    # datadir. Unlike a primary there is no mariadb-install-db: the snapshot
+    # carries the system tables. Auto-pick a port; retry only a lost start race
+    # with a fresh port (never re-pick a running instance's port).
+    local port
+    for attempt in 1 2 3; do
+        port="$(_get_free_port)"
+        mkdir -p "$datadir"
+        chown -R "$user:$user" "$_EMA_PROD_BASE/$dbname"
+        _prod_write_conf "$dbname" "$port" "$user" "$replica_conf"
+        if [[ ! -f "$datadir/ibdata1" ]]; then
+            [[ "$verbose" == "yes" ]] && echo "Restoring snapshot into: $datadir" >&2
+            mariabackup --copy-back --target-dir="$from_snapshot" --datadir="$datadir" >/dev/null 2>&1 || {
+                echo "Error: mariabackup --copy-back failed into '$datadir'" >&2
+                exit 1
+            }
+            chown -R "$user:$user" "$_EMA_PROD_BASE/$dbname"
+        fi
+        _prod_write_unit
+        systemctl daemon-reload
+        if systemctl enable --now "$unit" 2>/dev/null && _prod_wait_listening "$unit" "$port"; then
+            _PROD_PORT="$port"
+            break
+        fi
+        echo "Warning: replica instance $unit did not come up on port $port; retrying with a new port" >&2
+        systemctl stop "$unit" 2>/dev/null || true
+        rm -f "$conffile"
+        port=""
+    done
+    if [[ -z "$port" ]]; then
+        echo "Error: could not start replica instance $dbname after 3 attempts" >&2
+        exit 1
+    fi
+
+    # Attach the replica to the primary over the low-priv replication account
+    # (never root): resume from the snapshot's file/pos, then START SLAVE.
+    _PROD_SOCKET="$(_prod_sock "$dbname")"
+    MYSQL_UNIX_PORT="$_PROD_SOCKET"
+    _mariadb_args
+    local workdir replica_sql
+    workdir=$(mktemp -d /tmp/ema_replica_XXXXXX)
+    replica_sql="${workdir}/replica.sql"
+    cat > "$replica_sql" <<EOF
+CHANGE MASTER TO MASTER_HOST='${master_host}', MASTER_PORT=${master_port}, MASTER_USER='replication', MASTER_LOG_FILE='${snapshot_file}', MASTER_LOG_POS=${snapshot_pos};
+START SLAVE;
+EOF
+    [[ "$verbose" == "yes" ]] && echo "Attaching replica '$dbname' to primary '$replica_of'..." >&2
+    if ! _run_root_sql "" "$replica_sql"; then
+        rm -r "$workdir"
+        echo "Error: failed to configure/start replication for '$dbname'" >&2
+        exit 1
+    fi
+    rm -r "$workdir"
+
+    # Gate 3: the IO thread must be running. A missing/mis-pinned replication
+    # account, an unreachable primary, or a wrong-source snapshot all leave
+    # Slave_IO_Running != Yes.
+    local slave_io
+    slave_io=$("$DBMS" -u root "${_MARIADB_ARGS[@]}" -e "SHOW SLAVE STATUS\G" 2>/dev/null \
+        | awk -F: '/Slave_IO_Running/{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }')
+    if [[ "$slave_io" != "Yes" ]]; then
+        echo "Error: replica '$dbname' Slave_IO_Running is '${slave_io:-unset}' (expected Yes) — check the replication account on the primary (see doc/system/replica-bootstrap.md)" >&2
+        exit 1
+    fi
+
+    [[ "$quiet" == "no" ]] && echo "Created replica: $dbname (of $replica_of)"
     _prod_print_values "$dbname" "$_PROD_PORT" "$_PROD_SOCKET"
 }
 

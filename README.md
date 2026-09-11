@@ -68,6 +68,15 @@ The sibling `upgrade.sql` is the database bootstrap, with
 `default.php` defaults. Schema only — users/grants are consumer policy and
 never appear in a database package.
 
+### Read replicas
+
+A database package may instead declare `$db['type']='replica'` with
+`$db['replica_of']=<primary>`. `ema create srv/<name>-<GUID> --from-snapshot
+<path>` then restores the primary's shipped snapshot and attaches the replica
+over a low-priv `replication` account — no schema apply, `read_only=1`, and
+`replicate-rewrite-db=<primary>-><replica>`. The manual bootstrap that precedes
+it is documented in `doc/system/replica-bootstrap.md`.
+
 ## Command reference
 
 Shell and database lifecycle (each sandbox owns its instance under `var/sandbox/`):
