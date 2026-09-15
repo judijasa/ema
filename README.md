@@ -39,9 +39,14 @@ section that lacks the key. On the prod DB host, each `[<dbname>]` section
 carries `MYSQL_UNIX_PORT` so `ema mariadb <name>` (run as root over the
 socket) works, while the app layer keeps reading `.env` and stays on TCP.
 
-The prod `[<dbname>]` sections are supplied by the host's deployment tooling;
-`ema` needs no extra config to reach them (the transport, e.g. ZeroTier, is
-just whatever `SERVER` resolves to).
+Prod databases get their own MariaDB instance, named after the database:
+`ema create srv/<name>-<GUID>` provisions it (datadir/socket, the
+`mariadb@<db>` systemd unit, an auto-picked TCP port) and then creates the
+database and applies its schema. On success it emits the `[<dbname>]`
+connectivity section (`SERVER`/`PORT`/`DBMS`/`MYSQL_UNIX_PORT`) for the
+operator to record in the consumer's manual reuter.ini; `ema values <db>`
+re-prints those values (recovery). The transport (e.g. ZeroTier) is whatever
+`SERVER` resolves to.
 
 ### The `srv/<name>-<GUID>/default.php` definition
 
@@ -85,7 +90,8 @@ Shell and database lifecycle (each sandbox owns its instance under `var/sandbox/
 |---|---|
 | `ema sandbox srv/<name>-<GUID>` | Build a disposable per-instance sandbox for a database package (dev) |
 | `ema sandbox pkg/<pkg>-<GUID>` | Build a disposable sandbox for a schema package (synthesized db) |
-| `ema create srv/<name>-<GUID>` | Create a prod database from a database package (schema only, `EMA_TARGET=prod`) |
+| `ema create srv/<name>-<GUID>` | Provision the per-database instance + create a prod database from a package (`EMA_TARGET=prod`; no users/grants) |
+| `ema values <db>` | Print a prod database's instance connectivity section (recovery) |
 | `ema mariadb <db> [args...]` | Open a MariaDB shell against a database's section |
 | `ema start` / `ema stop` / `ema restart` | Start/stop/restart sandbox instance(s) (sandbox only) |
 | `ema status` | List instances/sections: up/down, endpoint, age |
@@ -117,13 +123,16 @@ block. Raw SQL over a built sandbox uses stdin redirection —
 Both creation verbs are **create-only**: the destructive bootstrap (create
 instance + database) runs once, and re-running against an existing target
 refuses — `ema drop` first, then recreate. `ema sandbox <target>` refuses
-when the sandbox instance already exists; `ema create srv/<name>-<GUID>` is
-the prod counterpart, refused under a sandbox target (`EMA_TARGET=prod`) and
-refused when the database already exists (checked via
-`information_schema.SCHEMATA`). `ema create --dry-run` prints the SQL that
-would run (bootstrap + dependency graph in topological order) without running
-it. There is no upgrade/reapply surface by design: change a database with
-imperative SQL or delete + recreate.
+when the sandbox instance already exists. `ema create srv/<name>-<GUID>` is
+the prod counterpart: it refuses when `EMA_TARGET` is not `prod`, refuses
+when the database already exists (checked via `information_schema.SCHEMATA`),
+and provisions the database's own instance (datadir/socket, `mariadb@<db>`
+unit, auto-picked port) before creating the database and applying its schema.
+On success it prints the `[<dbname>]` section values to record in reuter.ini
+(see `ema values <db>`). `ema create --dry-run` prints the SQL that would
+run (bootstrap + dependency graph in topological order) without provisioning
+or running it. There is no upgrade/reapply surface by design: change a
+database with imperative SQL or delete + recreate.
 
 Destructive operations follow a safety ladder:
 
@@ -137,8 +146,9 @@ Destructive operations follow a safety ladder:
   socket/TCP (root/sudo fallback).
 - `ema gc` removes **stopped** sandbox instances (`ema stop` first) under
   `var/sandbox/`; running instances are skipped.
-- `ema start` / `stop` / `restart` manage sandbox instance servers only; prod
-  servers are managed by the host's deployment tooling.
+- `ema start` / `stop` / `restart` manage sandbox instance servers only. Prod
+  instances are provisioned by `ema create` and run under systemd
+  (`mariadb@<db>`); there are no prod lifecycle verbs.
 
 ## Standalone template usage
 
@@ -188,8 +198,9 @@ SHOW TABLES;
 `ema sandbox` is deliberately simpler than a consumer's: it needs no
 `composer install`, no `.env` (it reads the per-instance
 `var/sandbox/<name>-<guid>/reuter.ini` or `$REUTER_INI` / `etc/reuter.ini`,
-never `.env`), no machines.ini, and no git-hooks. The only generic piece
-consumers reuse is the isolated MariaDB cluster init (`init-cluster.sh`).
+never `.env`), no machines.ini, and no git-hooks. The reusable pieces are the
+`ema` CLI (which initializes and runs each sandbox) and, optionally, the raw
+data-dir init `init-cluster.sh`.
 
 ## Reuse contract (for consumers)
 
@@ -215,8 +226,9 @@ Composer installs two reusable artifacts at `vendor/bin/`:
 | `ema` | the MariaDB package-manager CLI |
 | `init-cluster.sh` | the isolated MariaDB data-dir init (`mariadb-install-db` only — no daemon; `ema sandbox` starts instances), fully parameterized (data-dir/pid-file/socket) |
 
-Consumers call `init-cluster.sh` from their own `make dev-init` with their
-own paths, instead of keeping a duplicate copy. Everything else (`.env`
+`ema sandbox` initializes each sandbox's own datadir inline, so the normal
+path is just `ema sandbox <target>`; `init-cluster.sh` remains shipped as
+the raw data-dir primitive behind that step. Everything else (`.env`
 generation, `composer install` order, git-hooks) is consumer policy and
 stays in the consumer.
 
