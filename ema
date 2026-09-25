@@ -181,7 +181,7 @@ _load_target() {
     # The section is authoritative: clear any ambient connection vars first so
     # an exported value (e.g. MYSQL_UNIX_PORT from the dev shell) cannot leak
     # into a section that does not define it.
-    unset SERVER PORT DBNAME DBMS MYSQL_UNIX_PORT
+    unset SERVER PORT DBNAME MYSQL_UNIX_PORT
     eval "$vars"
 }
 
@@ -516,7 +516,6 @@ _write_sandbox_ini() {
 [$dbname]
 SERVER=localhost
 PORT=0
-DBMS=mariadb
 DBNAME=$dbname
 MYSQL_UNIX_PORT=$(_sandbox_sock "$key")
 EOF
@@ -665,6 +664,11 @@ _maybe_open_shell() {
 #   log-error = $EMA_PROD_BASE/<db>/mariadb.log
 #   config    = ${EMA_PROD_CONF_DIR:-/etc}/<db>/my.cnf
 #   unit      = mariadb@<db>   (host-provisioned; --defaults-file=/etc/%i/my.cnf)
+# The MariaDB client binary. ema is MariaDB-only, so DBMS is a constant; the
+# reuter.ini section carries connection values (SERVER/PORT/MYSQL_UNIX_PORT)
+# only. _load_target leaves DBMS alone, so this is the single source.
+DBMS="${DBMS:-mariadb}"
+
 # The shipped unit pins its defaults-file to /etc, so EMA_PROD_CONF_DIR only
 # takes effect together with a matching unit.
 # The per-instance my.cnf shields the daemon from the global /etc/mysql/
@@ -877,7 +881,6 @@ Record this section in reuter.ini:
 [$db]
 SERVER=$(_prod_server_addr)
 PORT=$port
-DBMS=mariadb
 MYSQL_UNIX_PORT=$sock
 EOF
 }
@@ -892,7 +895,7 @@ Provision a prod database from a database package: ensure the database's own
 MariaDB instance exists and is running (datadir, /etc/<db>/my.cnf, an
 auto-picked TCP port, the mariadb@<db> systemd unit), then create the database
 (dbname/charset/collation) and apply the schema-package dependency graph in
-topological order. On success the connectivity values (SERVER/PORT/DBMS/
+topological order. On success the connectivity values (SERVER/PORT/
 MYSQL_UNIX_PORT for the [<db>] section) are printed for the operator to record
 in the consumer's manual reuter.ini. Schema only — users/grants are consumer
 policy and are never created by ema.
@@ -1191,7 +1194,7 @@ _help_values() {
     cat <<'HELP'
 Usage: ema values <db>
 
-Print the [<db>] connectivity section (SERVER/PORT/DBMS/MYSQL_UNIX_PORT) of an
+Print the [<db>] connectivity section (SERVER/PORT/MYSQL_UNIX_PORT) of an
 existing prod database's instance, for recording in the consumer's manual
 reuter.ini. Recovery helper: the same values `ema create` emits on success.
 

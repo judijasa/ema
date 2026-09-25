@@ -43,7 +43,7 @@ Prod databases get their own MariaDB instance, named after the database:
 `ema create srv/<name>-<GUID>` provisions it (datadir/socket, an auto-picked
 TCP port, started under the host's `mariadb@<db>` systemd unit) and then
 creates the database and applies its schema. On success it emits the `[<dbname>]`
-connectivity section (`SERVER`/`PORT`/`DBMS`/`MYSQL_UNIX_PORT`) for the
+connectivity section (`SERVER`/`PORT`/`MYSQL_UNIX_PORT`) for the
 operator to record in the consumer's manual reuter.ini; `ema values <db>`
 re-prints those values (recovery). The transport (e.g. ZeroTier) is whatever
 `SERVER` resolves to.
