@@ -653,14 +653,20 @@ _maybe_open_shell() {
 }
 
 # --- prod per-database instances --------------------------------------------
-# ema owns prod instance provisioning: one MariaDB instance per database,
-# named after the database. Layout (root-owned; systemd for boot durability):
+# ema provisions the per-database instance's DATA (datadir, socket, pid, log,
+# config) and starts/stops the mariadb@<db> systemd unit. The unit itself is a
+# static file installed by the host's provisioning, NOT authored here — ema
+# only asserts it exists and refuses cleanly when missing, so an abort never
+# leaves a half-provisioned instance. Layout (root-owned; systemd for boot
+# durability):
 #   datadir   = $EMA_PROD_BASE/<db>/data
 #   socket    = $EMA_PROD_BASE/<db>/mysql.sock
 #   pid-file  = $EMA_PROD_BASE/<db>/mysql.pid
 #   log-error = $EMA_PROD_BASE/<db>/mariadb.log
 #   config    = ${EMA_PROD_CONF_DIR:-/etc}/<db>/my.cnf
-#   unit      = mariadb@<db>   (template; --defaults-file=<conf>/%i/my.cnf)
+#   unit      = mariadb@<db>   (host-provisioned; --defaults-file=/etc/%i/my.cnf)
+# The shipped unit pins its defaults-file to /etc, so EMA_PROD_CONF_DIR only
+# takes effect together with a matching unit.
 # The per-instance my.cnf shields the daemon from the global /etc/mysql/
 # includes (which would inject the distro socket/port/pid paths and collide
 # with other instances on the same host). The defaults are overridable for
@@ -758,31 +764,22 @@ _prod_write_conf() {
     chmod 644 "$(_prod_conf_file "$db")"
 }
 
-# Install the shared systemd template unit (one file, one unit instance per
-# database; the instance name selects the defaults file).
-_prod_write_unit() {
-    local dir mariadbd
-    dir="${EMA_PROD_SYSTEMD_DIR:-/etc/systemd/system}"
-    mariadbd="$(command -v mariadbd || command -v mysqld || true)"
-    if [[ -z "$mariadbd" ]]; then
-        echo "Error: mariadbd/mysqld not found (install MariaDB server)" >&2
+# The mariadb@.service template unit is a static file installed by the host's
+# provisioning, NOT authored here. ema only asserts it exists before touching
+# anything, so an interrupted run can never leave a half-provisioned instance
+# (a conf/datadir with no unit to start it).
+_prod_unit_file() { echo "/etc/systemd/system/mariadb@.service"; }
+
+_prod_require_unit() {
+    local unit_file
+    unit_file="$(_prod_unit_file)"
+    if [[ ! -f "$unit_file" ]]; then
+        echo "Error: systemd unit '$unit_file' not found" >&2
+        echo "The mariadb@.service template is host-provisioned (a static unit" >&2
+        echo "installed by the deploy/provision layer), not authored by ema — install" >&2
+        echo "it before running ema create." >&2
         exit 1
     fi
-    mkdir -p "$dir"
-    cat > "$dir/mariadb@.service" <<EOF
-[Unit]
-Description=MariaDB instance %i
-After=network.target
-
-[Service]
-ExecStart=$mariadbd --defaults-file=$(_prod_conf_base)/%i/my.cnf
-Restart=on-failure
-RestartSec=3
-LimitNOFILE=infinity
-
-[Install]
-WantedBy=multi-user.target
-EOF
 }
 
 # Wait (bounded) until <unit> is active AND accepting TCP on <port>.
@@ -818,6 +815,8 @@ _prod_instance_ensure() {
         exit 1
     fi
 
+    _prod_require_unit
+
     if [[ -f "$conffile" ]]; then
         _PROD_PORT="$(_prod_conf_port "$conffile")"
         if [[ -z "$_PROD_PORT" ]]; then
@@ -850,8 +849,6 @@ _prod_instance_ensure() {
                 exit 1
             }
         fi
-        _prod_write_unit
-        systemctl daemon-reload
         if systemctl enable --now "$unit" 2>/dev/null && _prod_wait_listening "$unit" "$port"; then
             _PROD_PORT="$port"
             [[ "$quiet" == "no" ]] && echo "    Instance $unit created (port $port)."
@@ -1104,6 +1101,7 @@ EOF
     fi
     datadir="$(_prod_data "$dbname")"
     unit="$(_prod_unit "$dbname")"
+    _prod_require_unit
     replica_conf="read_only = 1
 replicate-rewrite-db = $replica_of->$dbname
 server_id = $(_replica_server_id "$dbname")"
@@ -1140,8 +1138,6 @@ server_id = $(_replica_server_id "$dbname")"
             }
             chown -R "$user:$user" "$_EMA_PROD_BASE/$dbname"
         fi
-        _prod_write_unit
-        systemctl daemon-reload
         if systemctl enable --now "$unit" 2>/dev/null && _prod_wait_listening "$unit" "$port"; then
             _PROD_PORT="$port"
             break

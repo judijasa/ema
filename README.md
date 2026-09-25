@@ -40,9 +40,9 @@ carries `MYSQL_UNIX_PORT` so `ema mariadb <name>` (run as root over the
 socket) works, while the app layer keeps reading `.env` and stays on TCP.
 
 Prod databases get their own MariaDB instance, named after the database:
-`ema create srv/<name>-<GUID>` provisions it (datadir/socket, the
-`mariadb@<db>` systemd unit, an auto-picked TCP port) and then creates the
-database and applies its schema. On success it emits the `[<dbname>]`
+`ema create srv/<name>-<GUID>` provisions it (datadir/socket, an auto-picked
+TCP port, started under the host's `mariadb@<db>` systemd unit) and then
+creates the database and applies its schema. On success it emits the `[<dbname>]`
 connectivity section (`SERVER`/`PORT`/`DBMS`/`MYSQL_UNIX_PORT`) for the
 operator to record in the consumer's manual reuter.ini; `ema values <db>`
 re-prints those values (recovery). The transport (e.g. ZeroTier) is whatever
@@ -126,8 +126,9 @@ refuses — `ema drop` first, then recreate. `ema sandbox <target>` refuses
 when the sandbox instance already exists. `ema create srv/<name>-<GUID>` is
 the prod counterpart: it refuses when `EMA_TARGET` is not `prod`, refuses
 when the database already exists (checked via `information_schema.SCHEMATA`),
-and provisions the database's own instance (datadir/socket, `mariadb@<db>`
-unit, auto-picked port) before creating the database and applying its schema.
+and provisions the database's own instance (datadir/socket, auto-picked port,
+started under the host's `mariadb@<db>` unit) before creating the database and
+applying its schema.
 On success it prints the `[<dbname>]` section values to record in reuter.ini
 (see `ema values <db>`). `ema create --dry-run` prints the SQL that would
 run (bootstrap + dependency graph in topological order) without provisioning
