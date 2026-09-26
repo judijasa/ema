@@ -9,18 +9,25 @@ the database name). `EMA_TARGET` is a **binary flag** telling ema whether the
 connection is a sandbox database or a prod database — it is *not* a
 connection-file selector:
 
-- `EMA_TARGET` unset or `sandbox` (default): the connection is a per-instance
-  sandbox, one `var/sandbox/<name>-<guid>/reuter.ini` per database.
-- `EMA_TARGET=prod`: the connection file is `REUTER_INI` (fallback
-  `etc/reuter.ini`; copy `etc/reuter.ini.template` to create it).
+- `EMA_TARGET=sandbox`: the connection is a per-instance sandbox, one
+  `var/sandbox/<name>-<guid>/reuter.ini` per database.
+- `EMA_TARGET` unset or `prod` (default): the connection file is `REUTER_INI`
+  (fallback `etc/reuter.ini`; copy `etc/reuter.ini.template` to create it).
 
-The flag gates sandbox-vs-prod behavior: the CLI client user (`root` for
-sandboxes, `DBUSER`/`$USER` for prod), the destructive-safety ladder, and the
-server lifecycle commands. Prod file resolution stays a separate env var
-(`REUTER_INI`), so `EMA_TARGET` never selects a file. Prod machines run
-`EMA_TARGET=prod` by default because the deployed `.env` carries it; ema never
-reads `.env` itself, so the running shell needs it in scope
-(`set -a; . .env`).
+The flag decides where the one **dbname-addressed** verb looks: `ema mariadb
+<db>` takes nothing but a database name, so it picks between the per-instance
+sandbox ini and the prod file — along with the CLI client user (`root` for
+sandboxes, `DBUSER`/`$USER` for prod). Nothing else consults it. Verbs that are
+inherently one side resolve their own target: `ema sandbox` (build) loads its
+instance's ini, `ema create` / `ema values` always operate on the prod instance,
+and `ema start` / `stop` / `restart` / `gc` operate on `var/sandbox/` by
+construction. Verbs that address an instance **by path** need no flag either:
+`var/sandbox/<name>-<guid>/` is the sandbox namespace and `$EMA_PROD_BASE/<db>`
+the prod one, so the side falls out of the path — `ema status` prints both sides
+and is where those paths come from. Unset/empty means prod, matching the app
+layer's convention, so dev machines set `EMA_TARGET=sandbox` explicitly — the
+dev shell exports it for the dbname-addressed verb above. ema never reads `.env`
+itself, so the running shell needs the value in scope (`set -a; . .env`).
 
 Each sandbox owns its MariaDB instance (its own datadir/socket/pid/port under
 `var/sandbox/<name>-<guid>/`), which keeps disposable databases isolated —
@@ -30,7 +37,7 @@ database with its charset/collation) and applies schema-package dependencies;
 it never creates users or grants. User and service-account provisioning is
 consumer policy and runs as a separate operation in the consumer's own repo.
 Sandboxes are create-only: `ema sandbox <target>` refuses when the instance
-already exists (`ema drop` first, then rebuild).
+already exists (`ema gc var/sandbox/<name>-<guid>` first, then rebuild).
 
 Connections use the selected section's `MYSQL_UNIX_PORT` (local socket) when
 the section defines it, otherwise `SERVER`/`PORT` (TCP). The section is
@@ -90,13 +97,12 @@ Shell and database lifecycle (each sandbox owns its instance under `var/sandbox/
 |---|---|
 | `ema sandbox srv/<name>-<GUID>` | Build a disposable per-instance sandbox for a database package (dev) |
 | `ema sandbox pkg/<pkg>-<GUID>` | Build a disposable sandbox for a schema package (synthesized db) |
-| `ema create srv/<name>-<GUID>` | Provision the per-database instance + create a prod database from a package (`EMA_TARGET=prod`; no users/grants) |
+| `ema create srv/<name>-<GUID>` | Provision the per-database instance + create a prod database from a package (no users/grants) |
 | `ema values <db>` | Print a prod database's instance connectivity section (recovery) |
 | `ema mariadb <db> [args...]` | Open a MariaDB shell against a database's section |
-| `ema start` / `ema stop` / `ema restart` | Start/stop/restart sandbox instance(s) (sandbox only) |
-| `ema status` | List instances/sections: up/down, endpoint, age |
-| `ema drop <db>` | Delete a database (sandbox: whole instance; prod: DROP DATABASE) |
-| `ema gc` | Remove stopped sandbox instances under `var/sandbox/` (sandbox only) |
+| `ema start` / `ema stop` / `ema restart` | Start/stop/restart sandbox instance(s), addressed by `var/sandbox/<name>-<GUID>` path (sandbox instances only) |
+| `ema status` | List sandbox instances and prod sections: up/down, endpoint, age, path |
+| `ema gc [<path>]` | Remove stopped sandbox instance(s) under `var/sandbox/` (sandbox instances only) |
 
 Schema packages:
 
@@ -114,42 +120,43 @@ flags bundle (`-nq`).
 
 ## Lifecycle & destruction safety
 
-`ema sandbox` builds a disposable sandbox and then opens a shell
-(`ema mariadb <db>`); pass `-n/--no-shell` to print the command instead.
+`ema sandbox` builds a disposable sandbox and then opens a MariaDB shell on
+it; pass `-n/--no-shell` to print `EMA_TARGET=sandbox ema mariadb <db>`
+instead.
 Non-terminal stdin (pipes, CI) always prints the command, so scripts never
 block. Raw SQL over a built sandbox uses stdin redirection —
 `ema mariadb <db> < file.sql` — there is no dedicated `apply` verb.
 
 Both creation verbs are **create-only**: the destructive bootstrap (create
 instance + database) runs once, and re-running against an existing target
-refuses — `ema drop` first, then recreate. `ema sandbox <target>` refuses
-when the sandbox instance already exists. `ema create srv/<name>-<GUID>` is
-the prod counterpart: it refuses when `EMA_TARGET` is not `prod`, refuses
-when the database already exists (checked via `information_schema.SCHEMATA`),
-and provisions the database's own instance (datadir/socket, auto-picked port,
-started under the host's `mariadb@<db>` unit) before creating the database and
-applying its schema.
+refuses — `ema gc var/sandbox/<name>-<guid>` first, then recreate.
+`ema sandbox <target>` refuses when the sandbox instance already exists.
+`ema create srv/<name>-<GUID>` is the prod counterpart (it never consults
+`EMA_TARGET`): it refuses when the database already exists (checked via
+`information_schema.SCHEMATA`), and provisions the database's own instance
+(datadir/socket, auto-picked port, started under the host's `mariadb@<db>`
+unit) before creating the database and applying its schema.
 On success it prints the `[<dbname>]` section values to record in reuter.ini
 (see `ema values <db>`). `ema create --dry-run` prints the SQL that would
 run (bootstrap + dependency graph in topological order) without provisioning
 or running it. There is no upgrade/reapply surface by design: change a
 database with imperative SQL or delete + recreate.
 
-Destructive operations follow a safety ladder:
+Destructive operations are deliberately narrow — ema destroys sandbox
+instances and nothing else:
 
-- `ema drop <db>` on a sandbox prompts "remove sandbox database …? (Y/n)" —
-  default **Yes**. The deletion unit is the whole instance
-  (`var/sandbox/<name>-<guid>/`), not a database inside a shared server.
-- `ema drop <db>` on a prod target refuses: "not a sandbox database … use
-  `--force`".
-- `ema drop <db> --force` on prod prompts "remove database …? (y/N)" —
-  default **No**, then runs `DROP DATABASE` as root over the resolved
-  socket/TCP (root/sudo fallback).
 - `ema gc` removes **stopped** sandbox instances (`ema stop` first) under
-  `var/sandbox/`; running instances are skipped.
-- `ema start` / `stop` / `restart` manage sandbox instance servers only. Prod
-  instances are provisioned by `ema create` and run under systemd
-  (`mariadb@<db>`); there are no prod lifecycle verbs.
+  `var/sandbox/`; running instances are skipped. With a path
+  (`ema gc var/sandbox/<name>-<guid>`) only that instance is considered, and a
+  running one is refused.
+- `ema start` / `stop` / `restart` manage sandbox instance servers only, and
+  address one instance by its `var/sandbox/<name>-<guid>` path. Prod instances
+  are provisioned by `ema create` and run under systemd (`mariadb@<db>`); there
+  are no prod lifecycle verbs.
+- Deleting a prod database is a deliberate SQL action — there is no `ema drop`.
+  Run `DROP DATABASE` over the section's socket/TCP (`ema mariadb <db>` as root,
+  or any client). ema never removes a prod instance (`$EMA_PROD_BASE/<db>/`, its
+  `my.cnf`, its `mariadb@<db>` unit).
 
 ## Standalone template usage
 
