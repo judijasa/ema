@@ -1007,13 +1007,18 @@ _cmd_create() {
     # A replica package (type=replica, replica_of=<primary>) takes the
     # dedicated local-only build path: restore the primary's shipped snapshot,
     # then attach over the low-priv `replication` account — no schema apply.
-    local db_type replica_of db_binlog db_binlog_expire
+    local db_type replica_of db_binlog db_binlog_expire db_replica_ssl_verify
     db_type=$(echo "$defs" | jq -r '.db.type // "primary"')
     replica_of=$(echo "$defs" | jq -r '.db.replica_of // ""')
     db_binlog=$(echo "$defs" | jq -r 'if .db.binlog == true then "yes" else "no" end')
     db_binlog_expire=$(echo "$defs" | jq -r '.db.binlog_expire_days // 7')
+    # replica only: `$db['replica_ssl_verify_server_cert'] = true` makes the
+    # replica verify the primary's server certificate; default off because that
+    # certificate is the self-signed one MariaDB generates unless a consumer
+    # provisions a CA, and verifying a self-signed cert fails the IO thread.
+    db_replica_ssl_verify=$(echo "$defs" | jq -r 'if .db.replica_ssl_verify_server_cert == true then "1" else "0" end')
     if [[ "$db_type" == "replica" ]]; then
-        _cmd_create_replica "$dbname" "$replica_of"
+        _cmd_create_replica "$dbname" "$replica_of" "$db_replica_ssl_verify"
         return
     fi
     srv_dir=$(echo "$defs" | jq -r '.dir')
@@ -1072,8 +1077,11 @@ _cmd_create() {
 #      not replication-ready, or the snapshot is not a mariadb-backup backup);
 #   3. Slave_IO_Running != Yes after START SLAVE -> abort (missing/mis-pinned
 #      replication account, unreachable primary, or a wrong-source snapshot).
+# <ssl_verify> (1/0, default 0) is emitted as MASTER_SSL_VERIFY_SERVER_CERT, so
+# the channel's trust posture is the package's choice and never MariaDB's
+# implicit default.
 _cmd_create_replica() {
-    local dbname="$1" replica_of="$2"
+    local dbname="$1" replica_of="$2" ssl_verify="${3:-0}"
     local from_snapshot dry_run quiet verbose
     from_snapshot=$(_get_option --from-snapshot)
     dry_run=$(_get_flag --dry-run dry_run)
@@ -1137,7 +1145,7 @@ Replica build (dry-run):
   resume:    $snapshot_file:$snapshot_pos
   read_only: 1
   rewrite:   $replica_of->$dbname
-  CHANGE MASTER TO MASTER_HOST='$master_host', MASTER_PORT=$master_port, MASTER_USER='replication', MASTER_LOG_FILE='$snapshot_file', MASTER_LOG_POS=$snapshot_pos;
+  CHANGE MASTER TO MASTER_HOST='$master_host', MASTER_PORT=$master_port, MASTER_USER='replication', MASTER_LOG_FILE='$snapshot_file', MASTER_LOG_POS=$snapshot_pos, MASTER_SSL_VERIFY_SERVER_CERT=$ssl_verify;
 EOF
         return
     fi
@@ -1215,7 +1223,7 @@ server_id = $(_replica_server_id "$dbname")"
     workdir=$(mktemp -d /tmp/ema_replica_XXXXXX)
     replica_sql="${workdir}/replica.sql"
     cat > "$replica_sql" <<EOF
-CHANGE MASTER TO MASTER_HOST='${master_host}', MASTER_PORT=${master_port}, MASTER_USER='replication', MASTER_LOG_FILE='${snapshot_file}', MASTER_LOG_POS=${snapshot_pos};
+CHANGE MASTER TO MASTER_HOST='${master_host}', MASTER_PORT=${master_port}, MASTER_USER='replication', MASTER_LOG_FILE='${snapshot_file}', MASTER_LOG_POS=${snapshot_pos}, MASTER_SSL_VERIFY_SERVER_CERT=${ssl_verify};
 START SLAVE;
 EOF
     [[ "$verbose" == "yes" ]] && echo "Attaching replica '$dbname' to primary '$replica_of'..." >&2
@@ -1738,6 +1746,7 @@ SQL_EOF
     'collation' => 'utf8_spanish_ci',
     // 'binlog' => true,               // primary only: binary logging (replica source, PITR, CDC)
     // 'binlog_expire_days' => 7,      // retention (days); only applies with 'binlog'
+    // 'replica_ssl_verify_server_cert' => true, // replica only: verify the primary's server certificate
 );
 // Schema packages this database applies (pkg/<name>-<GUID>), dependency order.
 \$dependencies = array();

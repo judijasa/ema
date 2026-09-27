@@ -89,6 +89,15 @@ over a low-priv `replication` account — no schema apply, `read_only=1`, and
 `replicate-rewrite-db=<primary>-><replica>`. The manual bootstrap that precedes
 it is documented in `doc/system/replica-bootstrap.md`.
 
+A replica package may opt into verifying the primary's server certificate with
+`$db['replica_ssl_verify_server_cert'] = true`. The key is replica-only (a
+primary package never sets it) and defaults off: ema emits
+`MASTER_SSL_VERIFY_SERVER_CERT=0` unless it is set, because the primary's
+certificate is the self-signed one MariaDB generates until a consumer
+provisions a CA, and verifying a self-signed certificate fails the IO thread.
+Only the server-identity check is toggled — the replication channel stays
+TLS-encrypted either way.
+
 A primary package opts into binary logging with `$db['binlog'] = true`: `ema
 create` then writes `log_bin` + `binlog_format=ROW` + `expire_logs_days` to the
 instance `my.cnf` — a replication source (or a point-in-time-recovery/CDC
