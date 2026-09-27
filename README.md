@@ -89,6 +89,14 @@ over a low-priv `replication` account — no schema apply, `read_only=1`, and
 `replicate-rewrite-db=<primary>-><replica>`. The manual bootstrap that precedes
 it is documented in `doc/system/replica-bootstrap.md`.
 
+A primary package opts into binary logging with `$db['binlog'] = true`: `ema
+create` then writes `log_bin` + `binlog_format=ROW` + `expire_logs_days` to the
+instance `my.cnf` — a replication source (or a point-in-time-recovery/CDC
+source) with no post-build edit. Binlog retention is ema-owned and sized per
+package via `$db['binlog_expire_days']` (default 7 days). Without `binlog` the
+primary stays binlog-free, and a replica build needs the one-time hand edit
+first (see `doc/system/replica-bootstrap.md`).
+
 ## Command reference
 
 Shell and database lifecycle (each sandbox owns its instance under `var/sandbox/`):

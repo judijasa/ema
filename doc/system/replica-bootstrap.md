@@ -11,7 +11,8 @@ enforces — ema only reads the two package keys below.
 ## Quick setup
 
 ```bash
-# primary: log_bin enabled + the passwordless 'replication'@'<replica-ip>' account (REPLICATION SLAVE)
+# primary: declare $db['binlog'] = true in its srv/<name>-<GUID>/default.php
+# primary: the passwordless 'replication'@'<replica-ip>' account (REPLICATION SLAVE)
 mariabackup --backup --target-dir=/srv/backup/<primary> --user=root --socket=<primary-socket>
 # primary: record its [<primary>] section in the consumer's reuter.ini (TCP SERVER/PORT)
 
@@ -63,13 +64,21 @@ not a mariabackup backup), and `Slave_IO_Running != Yes` (missing/mis-pinned
 
 ## Manual bootstrap (before `ema create`)
 
-ema ships no helper for this; every step below is run by hand, **before**
-`ema create`. All of it happens against the primary.
+ema ships no helper for these steps, which run by hand **before** `ema
+create`. They happen against the primary, except that the binlog enablement in
+step 1 is a package opt-in (`$db['binlog'] = true`) — only a primary built
+without the key needs the hand edit.
 
-1. **Enable binlog on the primary.** The primary instance must write a binary
-   log (`log_bin`); otherwise its snapshot has no replication coordinate and
-   the replica build refuses to restore it. (GTID is preferred and a
-   future refinement; today ema resumes from the binlog file/position.)
+1. **The primary must have binary logging enabled.** A primary package opts
+   into it with `$db['binlog'] = true`, so `ema create srv/db0-<GUID>` writes
+   `log_bin` + `binlog_format=ROW` to the instance `my.cnf` and the primary is
+   replication-ready with no extra step. A primary built *without* the key
+   still needs the one-time hand edit: add
+   `log_bin = <EMA_PROD_BASE>/<primary>/binlog` and `binlog_format = ROW` to
+   its `my.cnf` and restart the daemon. Without `log_bin` the snapshot has no
+   replication coordinate and the replica build refuses to restore it. (GTID
+   is preferred and a future refinement; today ema resumes from the binlog
+   file/position.)
 
 2. **Create the `replication` transport account** on the primary, passwordless
    and host-pinned to the replica host:
