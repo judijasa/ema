@@ -960,7 +960,7 @@ surface — change a database with imperative SQL or delete + recreate.
 Flags:
   --dry-run         Print the SQL that would run, without provisioning or running it
   --from-snapshot <path>
-                    (replica only) restore this mariabackup backup instead of
+                    (replica only) restore this mariadb-backup backup instead of
                     applying schema — required for a type=replica package
   -q, --quiet       Suppress non-error output
   -v, --verbose     Print the action to stderr
@@ -1069,7 +1069,7 @@ _cmd_create() {
 # the manual bootstrap). Three gates fail loudly:
 #   1. --from-snapshot absent/unreadable  -> abort before provisioning;
 #   2. snapshot carries no binlog file/pos -> abort at restore (the primary was
-#      not replication-ready, or the snapshot is not a mariabackup backup);
+#      not replication-ready, or the snapshot is not a mariadb-backup backup);
 #   3. Slave_IO_Running != Yes after START SLAVE -> abort (missing/mis-pinned
 #      replication account, unreachable primary, or a wrong-source snapshot).
 _cmd_create_replica() {
@@ -1092,7 +1092,7 @@ _cmd_create_replica() {
         exit 1
     fi
     if [[ ! -d "$from_snapshot" ]]; then
-        echo "Error: --from-snapshot '$from_snapshot' is not a directory (expected a mariabackup backup)" >&2
+        echo "Error: --from-snapshot '$from_snapshot' is not a directory (expected a mariadb-backup backup)" >&2
         exit 1
     fi
 
@@ -1104,7 +1104,7 @@ _cmd_create_replica() {
     snapshot_info="$from_snapshot/mariadb_backup_info"
     [[ -f "$snapshot_info" ]] || snapshot_info="$from_snapshot/xtrabackup_info"
     if [[ ! -f "$snapshot_info" ]]; then
-        echo "Error: '$from_snapshot' is not a mariabackup backup (missing mariadb_backup_info/xtrabackup_info)" >&2
+        echo "Error: '$from_snapshot' is not a mariadb-backup backup (missing mariadb_backup_info/xtrabackup_info)" >&2
         exit 1
     fi
     snapshot_file=$(sed -n "s/^.*filename '\([^']*\)'.*\$/\1/p" "$snapshot_info")
@@ -1168,8 +1168,8 @@ server_id = $(_replica_server_id "$dbname")"
     backup_type=$(awk -F= '/^[[:space:]]*backup_type[[:space:]]*=/{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' "$checkpoints" 2>/dev/null)
     if [[ "$backup_type" != "log-applied" ]]; then
         [[ "$verbose" == "yes" ]] && echo "Preparing snapshot: $from_snapshot" >&2
-        mariabackup --prepare --target-dir="$from_snapshot" >/dev/null 2>&1 || {
-            echo "Error: mariabackup --prepare failed for '$from_snapshot'" >&2
+        mariadb-backup --prepare --target-dir="$from_snapshot" >/dev/null 2>&1 || {
+            echo "Error: mariadb-backup --prepare failed for '$from_snapshot'" >&2
             exit 1
         }
     fi
@@ -1186,8 +1186,8 @@ server_id = $(_replica_server_id "$dbname")"
         _prod_write_conf "$dbname" "$port" "$user" "$replica_conf" "no"
         if [[ ! -f "$datadir/ibdata1" ]]; then
             [[ "$verbose" == "yes" ]] && echo "Restoring snapshot into: $datadir" >&2
-            mariabackup --copy-back --target-dir="$from_snapshot" --datadir="$datadir" >/dev/null 2>&1 || {
-                echo "Error: mariabackup --copy-back failed into '$datadir'" >&2
+            mariadb-backup --copy-back --target-dir="$from_snapshot" --datadir="$datadir" >/dev/null 2>&1 || {
+                echo "Error: mariadb-backup --copy-back failed into '$datadir'" >&2
                 exit 1
             }
             chown -R "$user:$user" "$_EMA_PROD_BASE/$dbname"

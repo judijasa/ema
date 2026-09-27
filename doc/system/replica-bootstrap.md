@@ -13,7 +13,7 @@ enforces — ema only reads the two package keys below.
 ```bash
 # primary: declare $db['binlog'] = true in its srv/<name>-<GUID>/default.php
 # primary: the passwordless 'replication'@'<replica-ip>' account (REPLICATION SLAVE)
-mariabackup --backup --target-dir=/srv/backup/<primary> --user=root --socket=<primary-socket>
+mariadb-backup --backup --target-dir=/srv/backup/<primary> --user=root --socket=<primary-socket>
 # primary: record its [<primary>] section in the consumer's reuter.ini (TCP SERVER/PORT)
 
 # replica host
@@ -42,7 +42,7 @@ skips schema apply for a `type=replica` package.
 
 `ema create srv/db1-<GUID> --from-snapshot <path>`:
 
-1. refuses if `--from-snapshot <path>` is absent or not a mariabackup backup;
+1. refuses if `--from-snapshot <path>` is absent or not a mariadb-backup backup;
 2. reads the snapshot's binlog file/position (the replication coordinate);
 3. provisions the replica instance, writing `read_only=1`,
    `replicate-rewrite-db = db0->db1` (so the primary's `db0` schema is
@@ -59,7 +59,7 @@ in the consumer's reuter.ini supplies `MASTER_HOST`/`MASTER_PORT`.
 
 The build fails loudly on three gates: snapshot missing, snapshot with no
 binlog coordinate (the primary is not replication-ready, or the snapshot is
-not a mariabackup backup), and `Slave_IO_Running != Yes` (missing/mis-pinned
+not a mariadb-backup backup), and `Slave_IO_Running != Yes` (missing/mis-pinned
 `replication` account, unreachable primary, or a wrong-source snapshot).
 
 ## Manual bootstrap (before `ema create`)
@@ -96,7 +96,7 @@ without the key needs the hand edit.
    host:
 
    ```bash
-   mariabackup --backup --target-dir=/srv/backup/<primary> \
+   mariadb-backup --backup --target-dir=/srv/backup/<primary> \
      --user=root --socket=<primary-socket>
    ```
 
@@ -104,7 +104,7 @@ without the key needs the hand edit.
    unprepared backup before restoring):
 
    ```bash
-   mariabackup --prepare --target-dir=/srv/backup/<primary>
+   mariadb-backup --prepare --target-dir=/srv/backup/<primary>
    ```
 
 4. **Record the primary's `[<primary>]` section** in the consumer's
@@ -122,5 +122,5 @@ ema create srv/db1-<GUID> --from-snapshot /srv/backup/<primary>
 - **Coordinate style:** binlog file/position is the concrete coordinate today;
   GTID resume (`MASTER_USE_GTID=slave_pos` + `SET GLOBAL gtid_slave_pos`) is
   preferred and tracked for a later change.
-- **Snapshot tool:** `mariabackup` is the supported snapshot; a
+- **Snapshot tool:** `mariadb-backup` is the supported snapshot; a
   `mysqldump --master-data` SQL dump is not yet accepted by `--from-snapshot`.
