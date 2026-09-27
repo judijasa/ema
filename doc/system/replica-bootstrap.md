@@ -69,6 +69,24 @@ create`. They happen against the primary, except that the binlog enablement in
 step 1 is a package opt-in (`$db['binlog'] = true`) — only a primary built
 without the key needs the hand edit.
 
+The placeholders resolve to values the primary's own instance already knows —
+recover them on the primary host rather than guessing:
+
+- **`<primary>`** is the database name: the `dbname` in the package's
+  `srv/<name>-<GUID>/default.php`, and the `[<db>]` section header in the
+  consumer's reuter.ini.
+- **`<primary-socket>`** is the instance's root socket
+  `$EMA_PROD_BASE/<primary>/mysql.sock` (default
+  `/var/lib/mariadb/<primary>/mysql.sock`). Get it with `ema values <primary>`
+  (prints the `[<primary>]` section including `MYSQL_UNIX_PORT`), or read the
+  `socket =` line in the instance's `/etc/<primary>/my.cnf`.
+- **`<EMA_PROD_BASE>`** (in step 1's `log_bin` path) is the instance base dir,
+  `/var/lib/mariadb` unless overridden with `EMA_PROD_BASE` — the same base
+  that holds the socket above.
+- **`/srv/backup/<primary>`** is a scratch directory you choose on each host;
+  any path works — `<primary>` is just the name, so `/srv/backup/simo0` for a
+  primary named `simo0`.
+
 1. **The primary must have binary logging enabled.** A primary package opts
    into it with `$db['binlog'] = true`, so `ema create srv/db0-<GUID>` writes
    `log_bin` + `binlog_format=ROW` to the instance `my.cnf` and the primary is
