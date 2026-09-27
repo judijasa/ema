@@ -26,7 +26,7 @@ construction. Verbs that address an instance **by path** need no flag either:
 the prod one, so the side falls out of the path — `ema status` prints both sides
 and is where those paths come from. Unset/empty means prod, matching the app
 layer's convention, so dev machines set `EMA_TARGET=sandbox` explicitly — the
-dev shell exports it for the dbname-addressed verb above. ema never reads `.env`
+dev shell no longer exports it (sandbox is opt-in). ema never reads `.env`
 itself, so the running shell needs the value in scope (`set -a; . .env`).
 
 Each sandbox owns its MariaDB instance (its own datadir/socket/pid/port under
@@ -216,7 +216,7 @@ owns the data and policy.**
 Inspect the result interactively:
 
 ```bash
-ema mariadb test
+EMA_TARGET=sandbox ema mariadb test
 SHOW TABLES;
 ```
 
