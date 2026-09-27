@@ -8,6 +8,17 @@ Naming convention: the primary is `0`-suffixed and its replica `1`-suffixed
 (e.g. `db0` / `db1`). This is a consumer convention, not something ema
 enforces — ema only reads the two package keys below.
 
+## Quick setup
+
+```bash
+# primary: log_bin enabled + the passwordless 'replication'@'<replica-ip>' account (REPLICATION SLAVE)
+mariabackup --backup --target-dir=/srv/backup/<primary> --user=root --socket=<primary-socket>
+# primary: record its [<primary>] section in the consumer's reuter.ini (TCP SERVER/PORT)
+
+# replica host
+ema create srv/db1-<GUID> --from-snapshot /srv/backup/<primary>
+```
+
 ## The replica package
 
 A replica is an `srv/<name>-<GUID>` package whose `default.php` carries:
@@ -52,7 +63,7 @@ not a mariabackup backup), and `Slave_IO_Running != Yes` (missing/mis-pinned
 
 ## Manual bootstrap (before `ema create`)
 
-There is no automated helper; every step below is run by hand, **before**
+ema ships no helper for this; every step below is run by hand, **before**
 `ema create`. All of it happens against the primary.
 
 1. **Enable binlog on the primary.** The primary instance must write a binary
