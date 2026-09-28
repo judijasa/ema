@@ -12,7 +12,7 @@ final class RolesConfig implements \JsonSerializable
     /**
      * @param array<string, mixed> $sources
      * @param array<string, mixed> $accounts
-     * @param array<string, mixed> $allowlist
+     * @param array<int, string> $allowlist
      */
     public function __construct(
         public readonly array $sources = [],
