@@ -1,4 +1,11 @@
 <?php
+// The Config value classes are required explicitly (there is no autoloader in
+// the runtime `php -r`/`php sort_schemas.php` paths), so that default.php files
+// which `return new \Ema\Config\…` resolve before they are required below.
+require_once __DIR__ . '/Config/RolesConfig.php';
+require_once __DIR__ . '/Config/DatabaseConfig.php';
+require_once __DIR__ . '/Config/PackageConfig.php';
+
 // Topological sort to build schema packages in dependency order.
 class Graph {
     public $adjacency_list = array();
@@ -97,19 +104,29 @@ function find_srv_package($target) {
     return is_dir($dir) ? realpath($dir) : null;
 }
 
-// srv_definition(): load srv/<name>-<GUID>/default.php and return its default
-// database definition ($db) and schema-package dependencies ($dependencies).
-// $db is null when the file is the legacy shape (dependencies only).
+// srv_definition(): load srv/<name>-<GUID>/default.php (a returned
+// DatabaseConfig) and return its default database definition and schema-package
+// dependencies.
 function srv_definition($target) {
     $dir = find_srv_package($target);
     if ($dir === null) {
         fwrite(STDERR, "Error: srv package '$target' not found under srv/\n");
         exit(1);
     }
-    $db = null;
-    $dependencies = array();
-    require $dir . '/default.php';
-    return array('dir' => $dir, 'db' => $db, 'dependencies' => $dependencies);
+    try {
+        $config = require $dir . '/default.php';
+    } catch (\Throwable $e) {
+        // A constructor assertion (or any error inside the file) must reach the
+        // terminal: callers capture stdout, so an uncaught fatal would be
+        // swallowed and surface only as a bare non-zero exit.
+        fwrite(STDERR, "Error: srv/$target/default.php: {$e->getMessage()}\n");
+        exit(1);
+    }
+    if (!$config instanceof \Ema\Config\DatabaseConfig) {
+        fwrite(STDERR, "Error: srv/$target/default.php must return an \\Ema\\Config\\DatabaseConfig\n");
+        exit(1);
+    }
+    return array('dir' => $dir, 'db' => $config->toArray(), 'dependencies' => $config->dependencies);
 }
 
 function extract_dependencies($schema) {
@@ -118,8 +135,19 @@ function extract_dependencies($schema) {
         fwrite(STDERR, "Error: schema package '$schema' not found\n");
         exit(1);
     }
-    require_once $dir . '/default.php';
-    return $dependencies;
+    try {
+        $config = require $dir . '/default.php';
+    } catch (\Throwable $e) {
+        // Same reason as srv_definition(): callers capture stdout, so the
+        // message has to go to STDERR to be seen at all.
+        fwrite(STDERR, "Error: schema package '$schema' default.php: {$e->getMessage()}\n");
+        exit(1);
+    }
+    if (!$config instanceof \Ema\Config\PackageConfig) {
+        fwrite(STDERR, "Error: schema package '$schema' default.php must return an \\Ema\\Config\\PackageConfig\n");
+        exit(1);
+    }
+    return $config->dependencies;
 }
 
 // build_dependency_graph_roots(): build the graph over one or more root schema

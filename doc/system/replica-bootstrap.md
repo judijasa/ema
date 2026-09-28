@@ -11,7 +11,7 @@ enforces — ema only reads the two package keys below.
 ## Quick setup
 
 ```bash
-# primary: declare $db['binlog'] = true in its srv/<name>-<GUID>/default.php
+# primary: declare binlog: true in its srv/<name>-<GUID>/default.php
 # primary: the passwordless 'replication'@'<replica-ip>' account (REPLICATION SLAVE)
 mariadb-backup --backup --target-dir=/srv/backup/<primary> --user=root --socket=<primary-socket>
 # primary: record its [<primary>] section in the consumer's reuter.ini (TCP SERVER/PORT)
@@ -22,21 +22,21 @@ ema create srv/db1-<GUID> --from-snapshot /srv/backup/<primary>
 
 ## The replica package
 
-A replica is an `srv/<name>-<GUID>` package whose `default.php` carries:
+A replica is an `srv/<name>-<GUID>` package whose `default.php` returns:
 
 ```php
-$db = array(
-    'dbname'      => 'db1',          // the replica's own database name
-    'type'        => 'replica',
-    'replica_of'  => 'db0',          // the primary's database name
-    'charset'     => 'utf8',
-    'collation'   => 'utf8_spanish_ci',
+return new \Ema\Config\DatabaseConfig(
+    dbname: 'db1',            // the replica's own database name
+    type: 'replica',
+    replica_of: 'db0',        // the primary's database name
+    charset: 'utf8',
+    collation: 'utf8_spanish_ci',
 );
 ```
 
-There is no `$dependencies` and no `upgrade.sql`: the replica's schema arrives
-from the primary via replication, never from a schema builder. `ema create`
-skips schema apply for a `type=replica` package.
+The definition declares no `dependencies` and there is no `upgrade.sql`: the
+replica's schema arrives from the primary via replication, never from a schema
+builder. `ema create` skips schema apply for a `type=replica` package.
 
 ## What ema does (and requires)
 
@@ -66,7 +66,7 @@ not a mariadb-backup backup), and `Slave_IO_Running != Yes` (missing/mis-pinned
 
 ema ships no helper for these steps, which run by hand **before** `ema
 create`. They happen against the primary, except that the binlog enablement in
-step 1 is a package opt-in (`$db['binlog'] = true`) — only a primary built
+step 1 is a package opt-in (`binlog: true`) — only a primary built
 without the key needs the hand edit.
 
 The placeholders resolve to values the primary's own instance already knows —
@@ -88,7 +88,7 @@ recover them on the primary host rather than guessing:
   primary named `simo0`.
 
 1. **The primary must have binary logging enabled.** A primary package opts
-   into it with `$db['binlog'] = true`, so `ema create srv/db0-<GUID>` writes
+   into it with `binlog: true`, so `ema create srv/db0-<GUID>` writes
    `log_bin` + `binlog_format=ROW` to the instance `my.cnf` and the primary is
    replication-ready with no extra step. A primary built *without* the key
    still needs the one-time hand edit: add

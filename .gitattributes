@@ -1,6 +1,6 @@
 # Dev-only files excluded from the Composer dist (git archive export).
 # The dist ships: ema, src/, pkg/, bin/dev/init-cluster.sh (Composer bin),
-# composer.json, README.md, LICENSE.
+# composer.json, README.md, LICENSE, .gitattributes.
 doc/            export-ignore
 etc/            export-ignore
 srv/            export-ignore
@@ -10,3 +10,6 @@ flake.lock      export-ignore
 .gitignore      export-ignore
 var/            export-ignore
 bin/dev/shell-enter.sh export-ignore
+.pre-commit-config.yaml export-ignore
+hooks/          export-ignore
+phpstan.neon    export-ignore

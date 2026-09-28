@@ -12,3 +12,9 @@ repos:
         language: script
         files: ^flake\.nix$
         stages: [pre-commit]
+      - id: phpstan
+        name: PHPStan static analysis
+        entry: ./hooks/pre-commit-phpstan.sh
+        language: script
+        files: (\.php$|^phpstan\.neon$|^composer\.json$)
+        stages: [pre-commit]

@@ -68,9 +68,15 @@ re-prints those values (recovery). The transport (e.g. ZeroTier) is whatever
 
 ### The `srv/<name>-<GUID>/default.php` definition
 
-A database package's `default.php` carries the **default** definition — the
-dbname and charset/collation plus its schema-package `$dependencies`. Dev and
-prod share one emit path: `ema sandbox srv/<name>-<GUID>` (dev) and
+A database package's `default.php` **returns a typed config object** — the
+**default** definition: dbname, charset/collation and the schema-package
+`dependencies`. The type is `Ema\Config\DatabaseConfig` (`src/Config/`): the
+constructor signature is the field/default list, and the cross-field
+constraints (replica keys, binlog retention) are asserted in it, so a
+mis-shaped definition fails at load time instead of being read as an empty
+default. Types are also checked statically by PHPStan (`composer install`,
+then `vendor/bin/phpstan analyse` — also wired into the pre-commit hook). Dev
+and prod share one emit path: `ema sandbox srv/<name>-<GUID>` (dev) and
 `ema create srv/<name>-<GUID>` (prod) both read the same default; the
 connection file (`REUTER_INI` / `etc/reuter.ini`, or the per-instance
 `var/sandbox/.../reuter.ini`) supplies the machine-local endpoint. There are
@@ -78,12 +84,10 @@ no secrets in ema: `default.php` holds no passwords, and the connection file
 carries endpoint keys only.
 
 ```php
-$db = array(
-    'dbname' => 'test',
-    'charset' => 'utf8',
-    'collation' => 'utf8_spanish_ci',
+return new \Ema\Config\DatabaseConfig(
+    dbname: 'test',
+    dependencies: ['demo-1F2E3D4C5B6A7980'],
 );
-$dependencies = array('demo-1F2E3D4C5B6A7980');
 ```
 
 The sibling `upgrade.sql` is the database bootstrap, with
@@ -93,15 +97,15 @@ never appear in a database package.
 
 ### Read replicas
 
-A database package may instead declare `$db['type']='replica'` with
-`$db['replica_of']=<primary>`. `ema create srv/<name>-<GUID> --from-snapshot
+A database package may instead declare `type: 'replica'` with
+`replica_of: <primary>`. `ema create srv/<name>-<GUID> --from-snapshot
 <path>` then restores the primary's shipped snapshot and attaches the replica
 over a low-priv `replication` account — no schema apply, `read_only=1`, and
 `replicate-rewrite-db=<primary>-><replica>`. The manual bootstrap that precedes
 it is documented in `doc/system/replica-bootstrap.md`.
 
 A replica package may opt into verifying the primary's server certificate with
-`$db['replica_ssl_verify_server_cert'] = true`. The key is replica-only (a
+`replica_ssl_verify_server_cert: true`. The key is replica-only (a
 primary package never sets it) and defaults off: ema emits
 `MASTER_SSL_VERIFY_SERVER_CERT=0` unless it is set, because the primary's
 certificate is the self-signed one MariaDB generates until a consumer
@@ -144,7 +148,9 @@ Schema packages:
 Every command supports `--help`. Flags share one parser with `EMA_*` env
 fallbacks: `-f/--force` (`EMA_FORCE`), `-q/--quiet` (`EMA_QUIET`),
 `-v/--verbose` (`EMA_VERBOSE`), `-n/--no-shell` (`EMA_NO_SHELL`); short
-flags bundle (`-nq`).
+flags bundle (`-nq`). Flags are declared per verb, so `-n` is the no-shell
+flag where a verb opens a shell (`ema sandbox`) and the `--dry-run` alias
+where a verb provisions (`ema create`).
 
 ## Lifecycle & destruction safety
 
@@ -165,7 +171,7 @@ refuses — `ema gc var/sandbox/<name>-<guid>` first, then recreate.
 (datadir/socket, auto-picked port, started under the host's `mariadb@<db>`
 unit) before creating the database and applying its schema.
 On success it prints the `[<dbname>]` section values to record in reuter.ini
-(see `ema values <db>`). `ema create --dry-run` prints the SQL that would
+(see `ema values <db>`). `ema create -n`/`--dry-run` prints the SQL that would
 run (bootstrap + dependency graph in topological order) without provisioning
 or running it. There is no upgrade/reapply surface by design: change a
 database with imperative SQL or delete + recreate.
