@@ -45,7 +45,11 @@ Environment:
   EMA_TARGET             sandbox or prod (default) — connection flag for the
                          dbname-addressed verb (mariadb)
   REUTER_INI             Prod reuter.ini path (used when EMA_TARGET=prod)
-  DBUSER                 Default CLI client user for non-local targets (default: \$USER)
+  DBUSER                 CLI client user for a prod TCP connection (default: \$USER);
+                         required when the instance is not on this host
+  DBPASS                 Password for DBUSER, forwarded to the client as
+                         MYSQL_PWD; unset leaves the password to the client's
+                         own sources (MYSQL_PWD, ~/.my.cnf)
   EMA_PROD_BASE          Prod instance base dir (default: /var/lib/mariadb)
   EMA_PROD_USER          System user the prod instance runs as (default: mysql)
   EMA_PROD_BIND          Prod instance bind address (default: 0.0.0.0)
@@ -89,6 +93,10 @@ _find_package() {
 # lifecycle verbs never consult it, and 'status' lists both sides.
 # Unset/empty means prod — the app layer's convention, so EMA_TARGET is one
 # switch across the CLI and the app; sandbox is explicit.
+#
+# On the prod side the section decides the transport: its socket, as root, when
+# the instance exists on this host; its SERVER/PORT over TCP as DBUSER when it
+# does not (see doc/system/mariadb-remote.md).
 _target() {
     case "${EMA_TARGET:-}" in
         sandbox) echo "sandbox" ;;
@@ -497,7 +505,52 @@ Usage: ema mariadb <db> [args...]
 Open a MariaDB shell against a database's section. Extra args are passed
 through to the client (e.g. ema mariadb test -e "SHOW TABLES;"). Raw SQL
 from a file uses stdin redirection: ema mariadb <db> < file.sql
+
+The section is reached wherever its instance lives: on the instance's own host
+the section's socket is used as root (unix_socket auth); anywhere else the
+section's SERVER/PORT is used over TCP as DBUSER, which is required off-host.
+Off-host the password comes from DBPASS (forwarded to the client as MYSQL_PWD),
+else from the client's own sources (MYSQL_PWD, ~/.my.cnf); ema never asks for one
+itself, so a passwordless account connects and any other must be fed one.
+See doc/system/mariadb-remote.md.
 HELP
+}
+
+# Off-host prod connection: the instance is not on this host, so the section's
+# TCP endpoint is the only way in — the section's MYSQL_UNIX_PORT names a socket
+# that exists on the instance's host, not here. DBUSER is required: ema never
+# reaches an off-host instance as root, because root is a socket-auth identity
+# (unix_socket maps the OS user) and this machine is not the instance's host.
+# Sets _MARIADB_ARGS/_MARIADB_USER for _cmd_mariadb's client invocation.
+_offhost_connect() {
+    local dbname="$1"
+    if [[ -z "${SERVER:-}" ]]; then
+        echo "Error: section '$dbname' has no SERVER — cannot reach it from off-host" >&2
+        exit 1
+    fi
+    if [[ -z "${PORT:-}" ]]; then
+        echo "Error: section '$dbname' has no PORT — reaching it from off-host needs its TCP endpoint" >&2
+        exit 1
+    fi
+    if [[ -z "${DBUSER:-}" ]]; then
+        echo "Error: section '$dbname' is not on this host; set DBUSER to the SQL user to connect as" >&2
+        exit 1
+    fi
+    _MARIADB_ARGS=(-h "$SERVER" -P "$PORT")
+    _MARIADB_USER="$DBUSER"
+    echo "$dbname is not on this host; connecting over tcp to $SERVER:$PORT as $DBUSER" >&2
+}
+
+# DBUSER connections take DBPASS, forwarded as the client's own MYSQL_PWD (env,
+# never argv, nothing stored); the sandbox root path ignores it. Unset means ema
+# supplies nothing, leaving the password to the client's own sources (~/.my.cnf,
+# MYSQL_PWD in the caller's environment) — and to the client's own error when
+# none of them supplies one. ema never adds the client's -p: a prompt is the
+# caller's business, not the transport's.
+_forward_dbpass() {
+    if [[ -n "${DBPASS:-}" ]]; then
+        export MYSQL_PWD="$DBPASS"
+    fi
 }
 
 _cmd_mariadb() {
@@ -511,14 +564,22 @@ _cmd_mariadb() {
         dbname="${_args[0]}"
     fi
     _load_target "$dbname"
-    _mariadb_args
-    local _db_user
-    if _is_sandbox; then
-        _db_user="root"
+    if _is_sandbox || [[ -d "$_EMA_PROD_BASE/$dbname" ]]; then
+        # This host owns the instance: the section's own endpoint — its socket
+        # (as root, unix_socket auth) or its TCP address when the section
+        # defines no socket. Sandbox instances are local by construction.
+        _mariadb_args
+        if _is_sandbox; then
+            _MARIADB_USER="root"
+        else
+            _MARIADB_USER="${DBUSER:-$USER}"
+            _forward_dbpass
+        fi
     else
-        _db_user="${DBUSER:-$USER}"
+        _offhost_connect "$dbname"
+        _forward_dbpass
     fi
-    exec "$DBMS" -u "$_db_user" "${_MARIADB_ARGS[@]}" "${_args[@]}"
+    exec "$DBMS" -u "$_MARIADB_USER" "${_MARIADB_ARGS[@]}" "${_args[@]}"
 }
 
 # <prefix> + 14 random base36 chars -- schematic's type-prefixed GUID

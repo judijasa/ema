@@ -46,6 +46,17 @@ section that lacks the key. On the prod DB host, each `[<dbname>]` section
 carries `MYSQL_UNIX_PORT` so `ema mariadb <name>` (run as root over the
 socket) works, while the app layer keeps reading `.env` and stays on TCP.
 
+`ema mariadb <db>` follows its section to the instance: when the prod instance
+exists on this host (`$EMA_PROD_BASE/<db>/`, the path `ema status` prints) the
+section's socket is used as root; when it does not, the section's
+`SERVER`/`PORT` is used over TCP as `DBUSER` (required off-host), with `DBPASS`
+forwarded to the client as `MYSQL_PWD` when set. Without `DBPASS` the password
+is the client's own business: `MYSQL_PWD` and `~/.my.cnf` are honoured. ema
+itself never prompts, never reaches an off-host instance as root and opens no
+SSH path, so a section whose instance lives elsewhere — e.g. a primary's
+`SERVER`/`PORT`-only section recorded on the replica host — is reachable from any
+host that holds it. See `doc/system/mariadb-remote.md`.
+
 Prod databases get their own MariaDB instance, named after the database:
 `ema create srv/<name>-<GUID>` provisions it (datadir/socket, an auto-picked
 TCP port, started under the host's `mariadb@<db>` systemd unit) and then
@@ -116,7 +127,7 @@ Shell and database lifecycle (each sandbox owns its instance under `var/sandbox/
 | `ema sandbox pkg/<pkg>-<GUID>` | Build a disposable sandbox for a schema package (synthesized db) |
 | `ema create srv/<name>-<GUID>` | Provision the per-database instance + create a prod database from a package (no users/grants) |
 | `ema values <db>` | Print a prod database's instance connectivity section (recovery) |
-| `ema mariadb <db> [args...]` | Open a MariaDB shell against a database's section |
+| `ema mariadb <db> [args...]` | Open a MariaDB shell against a database's section (on the instance's host: its socket; off-host: TCP as `DBUSER`) |
 | `ema start` / `ema stop` / `ema restart` | Start/stop/restart sandbox instance(s), addressed by `var/sandbox/<name>-<GUID>` path (sandbox instances only) |
 | `ema status` | List sandbox instances and prod sections: up/down, endpoint, age, path |
 | `ema gc [<path>]` | Remove stopped sandbox instance(s) under `var/sandbox/` (sandbox instances only) |
