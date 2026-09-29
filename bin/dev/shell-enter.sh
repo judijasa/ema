@@ -41,10 +41,19 @@ export PATH="$PWD:$PATH"
 # exits. Nothing is started on entry.
 _ema_sandbox_shutdown() {
     local status=$?
-    if [[ -d "$EMA_REPO_PATH/var/sandbox" ]]; then
-        echo "Stopping sandbox MariaDB instances..."
-        ( cd "$EMA_REPO_PATH" && ./ema stop -q ) >/dev/null 2>&1 || true
-    fi
+    local dir pidfile pid
+    for dir in "$EMA_REPO_PATH"/var/sandbox/*/; do
+        [[ -d "$dir" ]] || continue
+        pidfile="$dir/mysql.pid"
+        [[ -f "$pidfile" ]] || continue
+        pid="$(cat "$pidfile" 2>/dev/null)"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            # At least one instance is alive: stop them all.
+            echo "Stopping sandbox MariaDB instances..."
+            ( cd "$EMA_REPO_PATH" && ./ema stop -q ) >/dev/null 2>&1 || true
+            break
+        fi
+    done
     return $status
 }
 trap _ema_sandbox_shutdown EXIT
