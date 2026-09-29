@@ -1,0 +1,19 @@
+; Host config — host-level settings, one [default] section per host.
+;
+; This is a TEMPLATE: copy it to the repo-root etc/ema.conf (git-ignored, a
+; sibling of etc/reuter.ini — the system /etc is not consulted) and set the
+; values this host needs. Unlike reuter.ini (one [<dbname>] section per
+; database), this file is host-wide: every instance ema provisions on this host
+; reads it.
+;
+; ssl-ca is the CA the instance's server verifies CLIENT certificates against —
+; the server half of a consumer's `REQUIRE X509` service account. Its value is
+; an absolute path on this host (typically under the system /etc/ssl), chosen
+; by the operator, who installs the CA out of band: ema records the path only
+; and never copies certificate bytes. Unset (or no file at all) emits no
+; ssl-ca line, leaving the instance on plain TCP. EMA_SSL_CA overrides the key.
+;
+; See doc/system/host-ssl-ca.md.
+
+[default]
+; ssl-ca = /etc/ssl/ema-ca.pem

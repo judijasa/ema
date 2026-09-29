@@ -66,6 +66,13 @@ operator to record in the consumer's manual reuter.ini; `ema values <db>`
 re-prints those values (recovery). The transport (e.g. ZeroTier) is whatever
 `SERVER` resolves to.
 
+Each instance's `[mysqld]` block also carries the host-level `ssl-ca` when the
+consumer-owned `etc/ema.conf` sets one — the CA the server verifies client
+certificates against, i.e. the server half of a `REQUIRE X509` service account
+(copy `etc/ema.conf.template` to create the file; `EMA_SSL_CA` overrides it).
+Unset leaves the instance on plain TCP, and ema records the path only — it never
+copies certificate bytes. See `doc/system/host-ssl-ca.md`.
+
 ### The `srv/<name>-<GUID>/default.php` definition
 
 A database package's `default.php` **returns a typed config object** — the

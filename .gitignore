@@ -3,4 +3,6 @@ var/
 vendor/
 .env
 composer.lock
+# Repo-root etc/ (not the system /etc).
 /etc/reuter.ini
+/etc/ema.conf

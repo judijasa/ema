@@ -54,6 +54,8 @@ Environment:
   EMA_PROD_USER          System user the prod instance runs as (default: mysql)
   EMA_PROD_BIND          Prod instance bind address (default: 0.0.0.0)
   EMA_SERVER             SERVER value emitted for prod sections (default: host overlay IP)
+  EMA_SSL_CA             CA the instance verifies client certificates against,
+                         overriding etc/ema.conf ([default] ssl-ca)
   EMA_FORCE/EMA_QUIET/EMA_VERBOSE/EMA_NO_SHELL
                          Env fallbacks for the -f/-q/-v/-n flags
 HELP
@@ -794,6 +796,30 @@ _prod_unit()      { echo "mariadb@$1"; }
 _prod_user()      { echo "${EMA_PROD_USER:-mysql}"; }
 _prod_bind()      { echo "${EMA_PROD_BIND:-0.0.0.0}"; }
 
+# The consumer-owned host config: the repo-root etc/ema.conf (like
+# etc/reuter.ini — the system /etc is never consulted), [default] section. Its
+# values are host-wide — one CA for every database on the host — so they belong
+# neither in a per-database package nor in a per-database reuter.ini section.
+# Tolerant by design: a missing file, a missing key or an unreadable file all
+# print nothing, i.e. ema's own default.
+_host_conf_get() {
+    local key="$1" file="etc/ema.conf"
+    [[ -f "$file" ]] || return 0
+    php -r "
+        \$cnf = @parse_ini_file('${file}', true);
+        if (is_array(\$cnf) && isset(\$cnf['default']['${key}']))
+            echo \$cnf['default']['${key}'];
+    " 2>/dev/null || true
+}
+
+# The CA the instance's [mysqld] verifies CLIENT certificates against — the
+# server half of a consumer's `REQUIRE X509` — read once per run (host-level,
+# never per instance) from the host config above, overridable with EMA_SSL_CA
+# (tests, one-off runs). The value is an absolute path on this host, chosen by
+# the consumer; empty (the default) emits no ssl-ca line, leaving the instance
+# on plain TCP.
+_EMA_SSL_CA="${EMA_SSL_CA:-$(_host_conf_get ssl-ca)}"
+
 # Pick a free TCP port with a kernel-assigned ephemeral bind (bind to port 0,
 # read the port, release). Inherently racy: the caller re-picks when a start
 # loses the race, and never re-picks a running instance's port.
@@ -862,7 +888,10 @@ _replica_server_id() {
 # replication source (or a point-in-time-recovery/CDC source); it is opt-in
 # via the package's `binlog: true`, and a replica never sets it
 # (read_only, and chained replication is out of scope). <expire> (days,
-# default 7) is the per-package retention (`binlog_expire_days`).
+# default 7) is the per-package retention (`binlog_expire_days`). The
+# host-level `ssl-ca` (`_EMA_SSL_CA`, from etc/ema.conf or EMA_SSL_CA) is
+# written when set: it is host-wide, so it is not an argument — every instance
+# on the host shares the one CA.
 _prod_write_conf() {
     local db="$1" port="$2" user="$3" extra="${4:-}" binlog="${5:-no}" expire="${6:-7}" dir
     dir="$(_prod_conf_base)/$db"
@@ -876,6 +905,9 @@ _prod_write_conf() {
         echo "user         = $user"
         echo "port         = $port"
         echo "bind-address = $(_prod_bind)"
+        # Host-level trust anchor: the CA this server verifies client
+        # certificates against (see _EMA_SSL_CA above). Unset -> no line.
+        [[ -n "$_EMA_SSL_CA" ]] && echo "ssl-ca       = $_EMA_SSL_CA"
         if [[ "$binlog" == "yes" ]]; then
             echo "log_bin          = $(_prod_binlog "$db")"
             echo "binlog_format    = ROW"
