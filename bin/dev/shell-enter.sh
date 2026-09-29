@@ -11,7 +11,8 @@
 # the prod default applies (the only verb that still consults it is the
 # dbname-addressed one, mariadb); sandbox stays an explicit opt-in
 # (`EMA_TARGET=sandbox ema mariadb <db>`). This script exports the repo/lib
-# locations, installs the PROJECT_NAME-scoped tmux alias, and binds an EXIT
+# locations, puts the repo root on PATH (so the bare `ema` command resolves),
+# installs the PROJECT_NAME-scoped tmux alias, and binds an EXIT
 # trap that stops the sandbox MariaDB instances when the shell exits. No
 # daemon is started on entry: instances are started by 'ema sandbox' (on
 # first build) and stopped on shell exit. Prompt styling (PS1) stays in the
@@ -30,6 +31,10 @@ PROJECT_NAME="$1"
 
 export EMA_REPO_PATH="$PWD"
 export EMA_LIB="$EMA_REPO_PATH/src"
+
+# Put the repo root on PATH so the bare `ema` command resolves inside the dev
+# shell (the flake's shellHook sources this script; nothing else adds it).
+export PATH="$PWD:$PATH"
 
 # Sandbox MariaDB instances (var/sandbox/<name>-<guid>/) are started by
 # 'ema sandbox' when a database is first built, and stopped when this shell
