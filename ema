@@ -1569,20 +1569,43 @@ _cmd_status() {
     _status_prod
 }
 
+# Both status sections print through _status_table: rows are tab-separated (key,
+# state, endpoint, age, path — none of them ever empty), and the key and endpoint
+# columns are sized to their longest value so the header labels sit above their
+# column instead of the rows drifting away from them.
+_status_table() {
+    local rows=("$@") row key state endpoint age path
+    local key_width=3 endpoint_width=8      # the "KEY"/"ENDPOINT" labels themselves
+    for row in "${rows[@]}"; do
+        IFS=$'\t' read -r key state endpoint age path <<< "$row"
+        (( ${#key} > key_width )) && key_width=${#key}
+        (( ${#endpoint} > endpoint_width )) && endpoint_width=${#endpoint}
+    done
+    printf '[%-*s]  %-2s  %-*s  %-6s  %s\n' \
+        "$key_width" KEY ST "$endpoint_width" ENDPOINT AGE PATH
+    for row in "${rows[@]}"; do
+        IFS=$'\t' read -r key state endpoint age path <<< "$row"
+        printf '[%-*s]  %-2s  %-*s  %-6s  %s\n' \
+            "$key_width" "$key" "$state" "$endpoint_width" "$endpoint" "$age" "$path"
+    done
+}
+
 _status_sandbox() {
     if [[ ! -d "var/sandbox" ]]; then
         echo "No sandbox instances."
         return
     fi
-    local keys=() dirs key
-    mapfile -t keys < <(ls -d var/sandbox/*/ 2>/dev/null)
-    if [[ ${#keys[@]} -eq 0 ]]; then
+    local dirs=() keys=() rows=() dir key
+    mapfile -t dirs < <(ls -d var/sandbox/*/ 2>/dev/null)
+    if [[ ${#dirs[@]} -eq 0 ]]; then
         echo "No sandbox instances."
         return
     fi
-    for dirs in "${keys[@]}"; do
-        key=$(basename "$dirs")
-        local pid state endpoint age ini
+    for dir in "${dirs[@]}"; do
+        keys+=("$(basename "$dir")")
+    done
+    local pid state endpoint age ini
+    for key in "${keys[@]}"; do
         ini="$(_sandbox_ini "$key")"
         pid="$(_sandbox_pid_value "$key")"
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
@@ -1592,8 +1615,9 @@ _status_sandbox() {
         fi
         endpoint="socket $(_sandbox_sock "$key")"
         age="$(_age "$ini")"
-        printf '[%s]  %-2s  %-30s  %-6s  %s\n' "$key" "$state" "$endpoint" "$age" "$(_sandbox_dir "$key")"
+        rows+=("$key"$'\t'"$state"$'\t'"$endpoint"$'\t'"$age"$'\t'"$(_sandbox_dir "$key")")
     done
+    _status_table "${rows[@]}"
 }
 
 _status_prod() {
@@ -1613,10 +1637,11 @@ _status_prod() {
         echo "No sections in $reuter."
         return
     fi
-    local name
-    while IFS= read -r name; do
+    local name names_list=() rows=()
+    mapfile -t names_list <<< "$names"
+    local vars endpoint state
+    for name in "${names_list[@]}"; do
         [[ -z "$name" ]] && continue
-        local vars endpoint state
         vars=$(php -r "
             \$cnf = parse_ini_file('${reuter}', true);
             foreach (['SERVER','PORT','MYSQL_UNIX_PORT'] as \$k)
@@ -1632,9 +1657,10 @@ _status_prod() {
         fi
         local path="$_EMA_PROD_BASE/$name"
         [[ -d "$path" ]] || path="-"
-        printf '[%s]  %-2s  %-30s  %-6s  %s\n' "$name" "$state" "$endpoint" "-" "$path"
+        rows+=("$name"$'\t'"$state"$'\t'"$endpoint"$'\t'"-"$'\t'"$path")
         unset SERVER PORT MYSQL_UNIX_PORT
-    done <<< "$names"
+    done
+    _status_table "${rows[@]}"
 }
 
 _list_sandbox_keys() {
