@@ -14,8 +14,15 @@ by the operator — ema never copies certificate bytes:
 
 ```bash
 install -m 644 /path/to/ca.pem /etc/ssl/ema-ca.pem
-cp etc/ema.conf.template etc/ema.conf
-$EDITOR etc/ema.conf          # [default]  ssl-ca = /etc/ssl/ema-ca.pem
+```
+
+The committed `etc/ema.default.conf` ships the fallback. Set the value there —
+or, for a host that diverges from it, in the git-ignored `etc/ema.conf`
+override (an empty `ssl-ca =` there clears the default):
+
+```ini
+[default]
+ssl-ca = /etc/ssl/ema-ca.pem
 ```
 
 Provision as usual; every instance ema creates on this host now carries the CA:
@@ -27,29 +34,39 @@ grep ssl-ca /etc/<db>/my.cnf  # ssl-ca       = /etc/ssl/ema-ca.pem
 
 ## The file
 
-`etc/ema.conf` is the **repo-root** `etc/` — the sibling of `etc/reuter.ini`,
-resolved against the repo root like every other path ema uses, *not* the system
-`/etc`. The `ssl-ca` value it carries is an absolute path on the host
-(typically under the system `/etc/ssl`), chosen by the consumer:
+`etc/ema.default.conf` and `etc/ema.conf` are the **repo-root** `etc/` — the
+siblings of `etc/reuter.ini`, resolved against the repo root like every other
+path ema uses, *not* the system `/etc`. ema merges the two, the override last:
+the committed `etc/ema.default.conf` (tracked, read as a fallback so a plain
+checkout works) then the optional git-ignored `etc/ema.conf` (the override).
+The `ssl-ca` value is an absolute path on the host (typically under the system
+`/etc/ssl`), chosen by the consumer:
 
 ```ini
 [default]
 ssl-ca = /etc/ssl/ema-ca.pem
 ```
 
-- Consumer-owned and git-ignored; `etc/ema.conf.template` ships the shape with
-  no value. One file per checkout — a host that provisions from several
-  checkouts needs the value in each of them.
-- `EMA_SSL_CA` overrides the key (tests, one-off runs).
-- Absent file, absent key and unreadable file all mean *no* `ssl-ca`: plain
-  TCP, exactly as before.
+Three-state resolution for `ssl-ca`:
+
+- **absent** (in both files) → no `ssl-ca` line: plain TCP, unchanged;
+- **empty in the override** (`ssl-ca =`) → no `ssl-ca` line, explicitly clearing
+  a defaulted value;
+- **present non-empty** → the CA path: it must be an **absolute** path (a
+  relative or quoted-`~` value is a loud error at read), and the file must exist
+  at `ema create` time (a loud error at consume).
+
+`EMA_SSL_CA` overrides the key (tests, one-off runs). An unreadable or malformed
+file is treated as absent, as before.
 
 ## What ema writes
 
 When the value is set, `_prod_write_conf` appends `ssl-ca = <path>` to the
 instance's `[mysqld]` block (${EMA_PROD_CONF_DIR:-/etc}/<db>/my.cnf), beside
 `bind-address`. It is written for **every** prod instance on the host, primary
-or replica, because the CA is host-level rather than a package key.
+or replica, because the CA is host-level rather than a package key. At consume
+time (`ema create`), ema checks that the CA file exists — the operator installs
+it out of band before provisioning.
 
 The write happens at **first provision** only: an instance's `my.cnf` is
 authoritative and never rewritten, so an instance that already exists keeps its

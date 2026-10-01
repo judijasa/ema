@@ -800,16 +800,26 @@ _prod_bind()      { echo "${EMA_PROD_BIND:-0.0.0.0}"; }
 # etc/reuter.ini — the system /etc is never consulted), [default] section. Its
 # values are host-wide — one CA for every database on the host — so they belong
 # neither in a per-database package nor in a per-database reuter.ini section.
-# Tolerant by design: a missing file, a missing key or an unreadable file all
-# print nothing, i.e. ema's own default.
+# Two layers, merged: the committed etc/ema.default.conf (tracked, read as a
+# fallback so a plain checkout works) then the optional git-ignored
+# etc/ema.conf (the override). An override that defines the key wins — even
+# empty, which explicitly clears a defaulted value (empty = "no CA").
 _host_conf_get() {
-    local key="$1" file="etc/ema.conf"
-    [[ -f "$file" ]] || return 0
-    php -r "
-        \$cnf = @parse_ini_file('${file}', true);
-        if (is_array(\$cnf) && isset(\$cnf['default']['${key}']))
-            echo \$cnf['default']['${key}'];
-    " 2>/dev/null || true
+    local key="$1"
+    php -r '
+        $key = $argv[1];
+        $val = null;
+        foreach (array("etc/ema.default.conf", "etc/ema.conf") as $f) {
+            if (!is_file($f)) { continue; }
+            $cnf = @parse_ini_file($f, true);
+            if (is_array($cnf) && isset($cnf["default"])
+                && array_key_exists($key, $cnf["default"])) {
+                $val = $cnf["default"][$key];
+            }
+        }
+        if ($val === null || $val === "") { exit(0); }
+        echo $val;
+    ' "$key"
 }
 
 # The CA the instance's [mysqld] verifies CLIENT certificates against — the
@@ -819,6 +829,14 @@ _host_conf_get() {
 # the consumer; empty (the default) emits no ssl-ca line, leaving the instance
 # on plain TCP.
 _EMA_SSL_CA="${EMA_SSL_CA:-$(_host_conf_get ssl-ca)}"
+# Shape check at read: a present value must be an absolute path (a relative
+# or quoted-tilde value is a config error, not a silent skip). Existence is
+# checked at consume time (_prod_write_conf) — the operator installs the CA
+# out of band.
+if [[ -n "$_EMA_SSL_CA" && "$_EMA_SSL_CA" != /* ]]; then
+    echo "Error: ssl-ca '$_EMA_SSL_CA' is not an absolute path (etc/ema.conf)" >&2
+    exit 1
+fi
 
 # Pick a free TCP port with a kernel-assigned ephemeral bind (bind to port 0,
 # read the port, release). Inherently racy: the caller re-picks when a start
@@ -894,6 +912,12 @@ _replica_server_id() {
 # on the host shares the one CA.
 _prod_write_conf() {
     local db="$1" port="$2" user="$3" extra="${4:-}" binlog="${5:-no}" expire="${6:-7}" dir
+    # Consume-time check: the CA must exist when it is written into the
+    # instance (shape was checked at read; the file is installed out of band).
+    if [[ -n "$_EMA_SSL_CA" && ! -f "$_EMA_SSL_CA" ]]; then
+        echo "Error: ssl-ca '$_EMA_SSL_CA' does not exist (etc/ema.conf)" >&2
+        exit 1
+    fi
     dir="$(_prod_conf_base)/$db"
     mkdir -p "$dir"
     {
