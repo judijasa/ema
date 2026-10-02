@@ -26,7 +26,6 @@ it, in the git-ignored `etc/ema.conf` override (an empty `ssl-ca =` there
 clears the default; `ssl-crl` needs `ssl-ca`):
 
 ```ini
-[default]
 ssl-ca  = /etc/ssl/ema-ca.pem
 ssl-crl = /etc/ssl/ema-crl.pem
 ```
@@ -52,7 +51,6 @@ The `ssl-ca` value is an absolute path on the host (typically under the system
 `/etc/ssl`), chosen by the consumer:
 
 ```ini
-[default]
 ssl-ca = /etc/ssl/ema-ca.pem
 ```
 

@@ -55,9 +55,9 @@ Environment:
   EMA_PROD_BIND          Prod instance bind address (default: 0.0.0.0)
   EMA_SERVER             SERVER value emitted for prod sections (default: host overlay IP)
   EMA_SSL_CA             CA the instance verifies client certificates against,
-                         overriding etc/ema.conf ([default] ssl-ca)
+                         overriding etc/ema.conf (ssl-ca)
   EMA_SSL_CRL            CRL the instance checks client certificates against,
-                         overriding etc/ema.conf ([default] ssl-crl)
+                         overriding etc/ema.conf (ssl-crl)
   EMA_FORCE/EMA_QUIET/EMA_VERBOSE/EMA_NO_SHELL
                          Env fallbacks for the -f/-q/-v/-n flags
 HELP
@@ -799,7 +799,7 @@ _prod_user()      { echo "${EMA_PROD_USER:-mysql}"; }
 _prod_bind()      { echo "${EMA_PROD_BIND:-0.0.0.0}"; }
 
 # The consumer-owned host config: the repo-root etc/ema.conf (like
-# etc/reuter.ini — the system /etc is never consulted), [default] section. Its
+# etc/reuter.ini — the system /etc is never consulted). Its
 # values are host-wide — one CA for every database on the host — so they belong
 # neither in a per-database package nor in a per-database reuter.ini section.
 # Two layers, merged: the committed etc/ema.default.conf (tracked, read as a
@@ -813,10 +813,9 @@ _host_conf_get() {
         $val = null;
         foreach (array("etc/ema.default.conf", "etc/ema.conf") as $f) {
             if (!is_file($f)) { continue; }
-            $cnf = @parse_ini_file($f, true);
-            if (is_array($cnf) && isset($cnf["default"])
-                && array_key_exists($key, $cnf["default"])) {
-                $val = $cnf["default"][$key];
+            $cnf = @parse_ini_file($f);
+            if (is_array($cnf) && array_key_exists($key, $cnf)) {
+                $val = $cnf[$key];
             }
         }
         if ($val === null || $val === "") { exit(0); }
