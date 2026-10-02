@@ -1,4 +1,4 @@
-# Host-level ssl-ca (the server half of `REQUIRE X509`)
+# Host-level ssl-ca / ssl-crl (the server half of `REQUIRE X509`)
 
 How a prod instance gets a CA to verify **client** certificates against, so a
 consumer's `REQUIRE X509` service account can authenticate at all: `REQUIRE
@@ -6,30 +6,39 @@ X509` without a CA authenticates nobody, because the server has no anchor to
 check a client certificate against. The CA is a host-level fact — one CA,
 shared by every database the host serves — so ema reads it once per run from a
 consumer-owned host config and writes it into each instance's `[mysqld]` block.
+The optional **`ssl-crl`** is the revocation half: a Certificate Revocation
+List the server consults when verifying a client cert, so a leaked certificate
+can be revoked without rotating the CA.
 
 ## Quick setup
 
-On the DB host, at the repo root. The CA file itself is installed out of band
-by the operator — ema never copies certificate bytes:
+On the DB host, at the repo root. The CA and CRL files themselves are installed
+out of band by the operator — ema never copies certificate bytes:
 
 ```bash
-install -m 644 /path/to/ca.pem /etc/ssl/ema-ca.pem
+install -m 644 /path/to/ca.pem  /etc/ssl/ema-ca.pem
+install -m 644 /path/to/crl.pem /etc/ssl/ema-crl.pem
 ```
 
-The committed `etc/ema.default.conf` ships the fallback. Set the value there —
-or, for a host that diverges from it, in the git-ignored `etc/ema.conf`
-override (an empty `ssl-ca =` there clears the default):
+The committed `etc/ema.default.conf` ships the `ssl-ca` fallback (and a
+commented `ssl-crl`). Set the value there — or, for a host that diverges from
+it, in the git-ignored `etc/ema.conf` override (an empty `ssl-ca =` there
+clears the default; `ssl-crl` needs `ssl-ca`):
 
 ```ini
 [default]
-ssl-ca = /etc/ssl/ema-ca.pem
+ssl-ca  = /etc/ssl/ema-ca.pem
+ssl-crl = /etc/ssl/ema-crl.pem
 ```
 
-Provision as usual; every instance ema creates on this host now carries the CA:
+Provision as usual; every instance ema creates on this host now carries the CA
+and the CRL:
 
 ```bash
 ema create srv/<name>-<GUID>
-grep ssl-ca /etc/<db>/my.cnf  # ssl-ca       = /etc/ssl/ema-ca.pem
+grep -E 'ssl-ca|ssl-crl' /etc/<db>/my.cnf
+# ssl-ca  = /etc/ssl/ema-ca.pem
+# ssl-crl = /etc/ssl/ema-crl.pem
 ```
 
 ## The file
@@ -61,21 +70,56 @@ file is treated as absent, as before.
 
 ## What ema writes
 
-When the value is set, `_prod_write_conf` appends `ssl-ca = <path>` to the
-instance's `[mysqld]` block (${EMA_PROD_CONF_DIR:-/etc}/<db>/my.cnf), beside
-`bind-address`. It is written for **every** prod instance on the host, primary
-or replica, because the CA is host-level rather than a package key. At consume
-time (`ema create`), ema checks that the CA file exists — the operator installs
-it out of band before provisioning.
+When the values are set, `_prod_write_conf` appends `ssl-ca = <path>` and
+`ssl-crl = <path>` to the instance's `[mysqld]` block
+(${EMA_PROD_CONF_DIR:-/etc}/<db>/my.cnf), beside `bind-address`. They are
+written for **every** prod instance on the host, primary or replica, because
+they are host-level rather than package keys. At consume time (`ema create`),
+ema checks that the CA and CRL files exist — the operator installs them out of
+band before provisioning.
 
 The write happens at **first provision** only: an instance's `my.cnf` is
 authoritative and never rewritten, so an instance that already exists keeps its
 file — add the line by hand to give it the CA.
 
+## Revocation (ssl-crl)
+
+`ssl-crl` is the server's Certificate Revocation List: when set, ema writes
+`ssl-crl = <path>` into the instance's `[mysqld]` beside `ssl-ca`, and the
+server checks every presented client certificate against it. A revoked
+certificate is rejected even though it still chains to the CA — revocation
+without rotating the CA.
+
+Resolution mirrors `ssl-ca`:
+
+- **absent** (in both files) → no `ssl-crl` line: the instance verifies client
+  certs but does not check revocation;
+- **empty in the override** (`ssl-crl =`) → no `ssl-crl` line, explicitly
+  clearing a defaulted value;
+- **present non-empty** → the CRL path: it must be **absolute** (loud error at
+  read), `ssl-ca` must also be set (a CRL with no CA is meaningless — loud
+  error at read), and the file must exist at `ema create` time.
+
+`EMA_SSL_CRL` overrides the key (tests, one-off runs).
+
+The CRL is read **at server startup only** (MariaDB's `ssl-crl` is a read-only
+startup variable): `FLUSH SSL` reloads the CA and server key but **not** the
+CRL, and there is no hot reload. Applying a new CRL means regenerating it,
+installing the file at the configured path, and restarting the instance — a
+rare event, reserved for an actual revocation.
+
+The CRL is **consumer data**: generating it (`openssl ca -revoke <serial>` then
+`openssl ca -gencrl`) is a standard `openssl ca` workflow on the consumer's
+offline CA machine, which keeps the `index.txt` ledger a CRL is generated from.
+ema never generates or rotates the CRL; it only records the path. Because the
+CA machine is offline and CRLs expire (typically 30 days), renewal is an
+operator-scheduled task, not a cron on the CA.
+
 ## Scope
 
-- the CA certificate file is the operator's: installed out of band, never
-  copied or generated by ema;
+- the CA and CRL files are the operator's: installed out of band, never
+  copied or generated by ema — the CRL is regenerated on the offline CA machine
+  (`openssl ca`), and ema records the path only;
 - the client certificate/key material and the `REQUIRE X509` declaration are
   consumer data, like every other account attribute;
 - **client-side server verification** and the replication channel's client-cert

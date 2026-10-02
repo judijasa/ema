@@ -56,6 +56,8 @@ Environment:
   EMA_SERVER             SERVER value emitted for prod sections (default: host overlay IP)
   EMA_SSL_CA             CA the instance verifies client certificates against,
                          overriding etc/ema.conf ([default] ssl-ca)
+  EMA_SSL_CRL            CRL the instance checks client certificates against,
+                         overriding etc/ema.conf ([default] ssl-crl)
   EMA_FORCE/EMA_QUIET/EMA_VERBOSE/EMA_NO_SHELL
                          Env fallbacks for the -f/-q/-v/-n flags
 HELP
@@ -838,6 +840,29 @@ if [[ -n "$_EMA_SSL_CA" && "$_EMA_SSL_CA" != /* ]]; then
     exit 1
 fi
 
+# The CRL the instance's [mysqld] checks CLIENT certificates against — a
+# revocation list the server consults while verifying a client cert. It only
+# means anything together with ssl-ca (a CRL with no CA checks nothing), so it
+# is validated against it. Read once per run from the host config above,
+# overridable with EMA_SSL_CRL (tests, one-off runs). Empty (the default)
+# emits no ssl-crl line — the instance still verifies client certs, but does
+# not check revocation.
+_EMA_SSL_CRL="${EMA_SSL_CRL:-$(_host_conf_get ssl-crl)}"
+# Shape check at read: a present value must be an absolute path (a relative
+# or quoted-tilde value is a config error, not a silent skip). Existence is
+# checked at consume time (_prod_write_conf) — the operator installs the CRL
+# out of band, like the CA.
+if [[ -n "$_EMA_SSL_CRL" && "$_EMA_SSL_CRL" != /* ]]; then
+    echo "Error: ssl-crl '$_EMA_SSL_CRL' is not an absolute path (etc/ema.conf)" >&2
+    exit 1
+fi
+# A CRL without a CA is meaningless: ssl-crl requires ssl-ca. (The reverse is
+# allowed — a CA without a CRL verifies but does not check revocation.)
+if [[ -n "$_EMA_SSL_CRL" && -z "$_EMA_SSL_CA" ]]; then
+    echo "Error: ssl-crl is set but ssl-ca is not (etc/ema.conf) — a CRL is meaningless without a CA" >&2
+    exit 1
+fi
+
 # Pick a free TCP port with a kernel-assigned ephemeral bind (bind to port 0,
 # read the port, release). Inherently racy: the caller re-picks when a start
 # loses the race, and never re-picks a running instance's port.
@@ -907,15 +932,20 @@ _replica_server_id() {
 # via the package's `binlog: true`, and a replica never sets it
 # (read_only, and chained replication is out of scope). <expire> (days,
 # default 7) is the per-package retention (`binlog_expire_days`). The
-# host-level `ssl-ca` (`_EMA_SSL_CA`, from etc/ema.conf or EMA_SSL_CA) is
-# written when set: it is host-wide, so it is not an argument — every instance
-# on the host shares the one CA.
+# host-level `ssl-ca` and `ssl-crl` (`_EMA_SSL_CA`/`_EMA_SSL_CRL`, from
+# etc/ema.conf or EMA_SSL_CA/EMA_SSL_CRL) are written when set: they are
+# host-wide, so they are not arguments — every instance on the host shares the
+# one CA and CRL.
 _prod_write_conf() {
     local db="$1" port="$2" user="$3" extra="${4:-}" binlog="${5:-no}" expire="${6:-7}" dir
     # Consume-time check: the CA must exist when it is written into the
     # instance (shape was checked at read; the file is installed out of band).
     if [[ -n "$_EMA_SSL_CA" && ! -f "$_EMA_SSL_CA" ]]; then
         echo "Error: ssl-ca '$_EMA_SSL_CA' does not exist (etc/ema.conf)" >&2
+        exit 1
+    fi
+    if [[ -n "$_EMA_SSL_CRL" && ! -f "$_EMA_SSL_CRL" ]]; then
+        echo "Error: ssl-crl '$_EMA_SSL_CRL' does not exist (etc/ema.conf)" >&2
         exit 1
     fi
     dir="$(_prod_conf_base)/$db"
@@ -932,6 +962,9 @@ _prod_write_conf() {
         # Host-level trust anchor: the CA this server verifies client
         # certificates against (see _EMA_SSL_CA above). Unset -> no line.
         [[ -n "$_EMA_SSL_CA" ]] && echo "ssl-ca       = $_EMA_SSL_CA"
+        # Revocation list checked against client certs (see _EMA_SSL_CRL
+        # above). Unset -> no line (verifies, but does not check revocation).
+        [[ -n "$_EMA_SSL_CRL" ]] && echo "ssl-crl      = $_EMA_SSL_CRL"
         if [[ "$binlog" == "yes" ]]; then
             echo "log_bin          = $(_prod_binlog "$db")"
             echo "binlog_format    = ROW"
