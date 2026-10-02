@@ -84,8 +84,8 @@ recover them on the primary host rather than guessing:
   `/var/lib/mariadb` unless overridden with `EMA_PROD_BASE` — the same base
   that holds the socket above.
 - **`/srv/backup/<primary>`** is a scratch directory you choose on each host;
-  any path works — `<primary>` is just the name, so `/srv/backup/simo0` for a
-  primary named `simo0`.
+  any path works — `<primary>` is just the name, so `/srv/backup/db0` for a
+  primary named `db0`.
 
 1. **The primary must have binary logging enabled.** A primary package opts
    into it with `binlog: true`, so `ema create srv/db0-<GUID>` writes
