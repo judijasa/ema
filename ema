@@ -1455,24 +1455,30 @@ EOF
 
     # Gate 3: both replication threads must reach Yes. A missing/mis-pinned
     # replication account, an unreachable primary, or a wrong-source snapshot
-    # leave Slave_IO_Running or Slave_SQL_Running != Yes — and the threads lag
-    # START SLAVE, so sample within a bounded wait rather than a single
-    # immediate snapshot, and report the real thread errors.
-    local slave_io slave_sql last_io_error last_sql_errno last_sql_error status i
-    for (( i=0; i<50; i++ )); do
+    # leave Slave_IO_Running or Slave_SQL_Running != Yes. The IO thread starts
+    # in a transient 'Connecting' state and only settles to Yes/No once the
+    # first connect resolves (a firewall DROP can hold it for up to
+    # slave-net-timeout, ~60s), so wait for it to leave 'Connecting' rather
+    # than misreporting the transient state as the verdict — and report the
+    # real thread errors.
+    local slave_io slave_sql last_io_errno last_io_error last_sql_errno last_sql_error status i
+    for (( i=0; i<600; i++ )); do
         status=$("$DBMS" -u root "${_MARIADB_ARGS[@]}" -e "SHOW SLAVE STATUS\G" 2>/dev/null)
         slave_io=$(awk -F: '/Slave_IO_Running/{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' <<<"$status")
         slave_sql=$(awk -F: '/Slave_SQL_Running/{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' <<<"$status")
         if [[ "$slave_io" == "Yes" && "$slave_sql" == "Yes" ]]; then
             break
         fi
+        # stop once the IO thread has settled on a definitive failure
+        [[ "$slave_io" == "No" ]] && break
         sleep 0.1
     done
     if [[ "$slave_io" != "Yes" || "$slave_sql" != "Yes" ]]; then
+        last_io_errno=$(awk -F: '/Last_IO_Errno:/{ sub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' <<<"$status")
         last_io_error=$(awk -F: '/Last_IO_Error:/{ sub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' <<<"$status")
         last_sql_errno=$(awk -F: '/Last_SQL_Errno:/{ sub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' <<<"$status")
         last_sql_error=$(awk -F: '/Last_SQL_Error:/{ sub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }' <<<"$status")
-        echo "Error: replica '$instance' not replicating (Slave_IO_Running='${slave_io:-unset}', Slave_SQL_Running='${slave_sql:-unset}') — Last_IO_Error: ${last_io_error:-none}; Last_SQL_Errno: ${last_sql_errno:-0}; Last_SQL_Error: ${last_sql_error:-none} (see doc/system/replica-bootstrap.md)" >&2
+        echo "Error: replica '$instance' not replicating (Slave_IO_Running='${slave_io:-unset}', Slave_SQL_Running='${slave_sql:-unset}') — Last_IO_Errno: ${last_io_errno:-0}; Last_IO_Error: ${last_io_error:-none}; Last_SQL_Errno: ${last_sql_errno:-0}; Last_SQL_Error: ${last_sql_error:-none} (see doc/system/replica-bootstrap.md)" >&2
         exit 1
     fi
 
