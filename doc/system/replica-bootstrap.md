@@ -4,9 +4,11 @@ How a read-only replica is created from a writable primary with ema. The
 replica serves reads so a consumer's read path (e.g. a public website) never
 touches the writable primary.
 
-Naming convention: the primary is `0`-suffixed and its replica `1`-suffixed
-(e.g. `db0` / `db1`). This is a consumer convention, not something ema
-enforces — ema only reads the two package keys below.
+Naming convention: the database (schema) has a plain name (`db`); the `0`/`1`
+suffixes mark the **instances** that serve it — `db0` the writable primary and
+`db1` the read-only replica, both serving the one `db` schema. This is a
+consumer convention, not something ema enforces — ema only reads the two
+package keys below (`dbname` and `replica_of`).
 
 ## Quick setup
 
@@ -26,13 +28,19 @@ A replica is an `srv/<name>-<GUID>` package whose `default.php` returns:
 
 ```php
 return new \Ema\Config\DatabaseConfig(
-    dbname: 'db1',            // the replica's own database name
+    dbname: 'db',             // the schema both instances serve (the primary's)
     type: 'replica',
-    replica_of: 'db0',        // the primary's database name
+    replica_of: 'db0',        // the primary's instance name
     charset: 'utf8',
     collation: 'utf8_spanish_ci',
 );
 ```
+
+The package name (`db1`, from `srv/db1-<GUID>`) is the replica's **instance**;
+`dbname` is the schema it serves — the shared `db`, not a schema of its own.
+The primary package (`srv/db0-<GUID>`) declares the same `dbname: 'db'`; `ema
+create` asserts the two agree and serves the primary's schema under its own
+name, with no rename or rewrite.
 
 The definition declares no `dependencies` and there is no `upgrade.sql`: the
 replica's schema arrives from the primary via replication, never from a schema
@@ -42,25 +50,30 @@ builder. `ema create` skips schema apply for a `type=replica` package.
 
 `ema create srv/db1-<GUID> --from-snapshot <path>`:
 
-1. refuses if `--from-snapshot <path>` is absent or not a mariadb-backup backup;
-2. reads the snapshot's binlog file/position (the replication coordinate);
-3. provisions the replica instance, writing `read_only=1`,
-   `replicate-rewrite-db = db0->db1` (so the primary's `db0` schema is
-   presented as `db1` on the replica), and a distinct `server_id`;
-4. restores the snapshot into the replica datadir (no `mariadb-install-db` —
+1. asserts the replica's `dbname` equals the primary package's `dbname` (a
+   replica serves the primary's schema under the schema's own name), and refuses otherwise;
+2. refuses if `--from-snapshot <path>` is absent or not a mariadb-backup backup;
+3. reads the snapshot's binlog file/position (the replication coordinate);
+4. provisions the replica instance, writing `read_only=1` and a distinct
+   `server_id` (no `replicate-rewrite-db` — the replica serves the primary's
+   schema under the schema's own name, unchanged);
+5. restores the snapshot into the replica datadir (no `mariadb-install-db` —
    the snapshot carries the system tables);
-5. `CHANGE MASTER` + `START SLAVE` against the primary over the low-priv
+6. `CHANGE MASTER` + `START SLAVE` against the primary over the low-priv
    `replication` account, resuming from the snapshot's coordinate;
-6. verifies `Slave_IO_Running = Yes` and aborts loudly otherwise.
+7. verifies `Slave_IO_Running` and `Slave_SQL_Running` are both `Yes`, and
+   aborts loudly with `Last_IO_Error`/`Last_SQL_Errno` otherwise.
 
 ema runs **local-only** on the replica host and reaches the primary only over
 the `replication` account — never as root. The primary's `[<primary>]` section
-in the consumer's reuter.ini supplies `MASTER_HOST`/`MASTER_PORT`.
+in the consumer's reuter.ini supplies `MASTER_HOST`/`MASTER_PORT` (the header
+is the primary's instance; `DBNAME` names the schema it serves).
 
-The build fails loudly on three gates: snapshot missing, snapshot with no
-binlog coordinate (the primary is not replication-ready, or the snapshot is
-not a mariadb-backup backup), and `Slave_IO_Running != Yes` (missing/mis-pinned
-`replication` account, unreachable primary, or a wrong-source snapshot).
+The build fails loudly on: a `dbname` that does not match the primary package's,
+a missing snapshot, a snapshot with no binlog coordinate (the primary is not
+replication-ready, or the snapshot is not a mariadb-backup backup), and
+replication threads that never reach `Yes` (missing/mis-pinned `replication`
+account, unreachable primary, or a wrong-source snapshot).
 
 ## Manual bootstrap (before `ema create`)
 
@@ -72,9 +85,11 @@ without the key needs the hand edit.
 The placeholders resolve to values the primary's own instance already knows —
 recover them on the primary host rather than guessing:
 
-- **`<primary>`** is the database name: the `dbname` in the package's
-  `srv/<name>-<GUID>/default.php`, and the `[<db>]` section header in the
-  consumer's reuter.ini.
+- **`<primary>`** is the primary's **instance** name: the package name in
+  `srv/<name>-<GUID>/`, and the `[<primary>]` section header in the consumer's
+  reuter.ini. The schema it serves (`dbname`) is a plain name distinct from the
+  instance — recover it from the package's `default.php` (`dbname`) or from
+  `ema values <primary>` (which prints `DBNAME`).
 - **`<primary-socket>`** is the instance's root socket
   `$EMA_PROD_BASE/<primary>/mysql.sock` (default
   `/var/lib/mariadb/<primary>/mysql.sock`). Get it with `ema values <primary>`

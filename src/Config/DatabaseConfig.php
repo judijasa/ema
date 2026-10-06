@@ -5,8 +5,10 @@ namespace Ema\Config;
 /**
  * Default database definition for an srv/<name>-<GUID> package.
  *
- * Defaults live in the constructor signature; cross-field constraints are
- * asserted here, so a mis-shaped definition fails at require-time (and the
+ * The package name is the **instance**; `dbname` is the database (schema) the
+ * instance serves, and `replica_of` names the primary's instance. Defaults
+ * live in the constructor signature; cross-field constraints are asserted
+ * here, so a mis-shaped definition fails at require-time (and the
  * structural/typing drift is caught statically by PHPStan). The schema packages
  * this database applies are `dependencies` — surfaced separately by
  * sort_schemas.php's srv_definition(), mirroring the legacy $db/$dependencies
@@ -15,6 +17,11 @@ namespace Ema\Config;
 final class DatabaseConfig implements \JsonSerializable
 {
     /**
+     * @param string $dbname The database (schema) this instance serves: a
+     *                       primary creates it; a replica serves the primary's
+     *                       schema under the same name (asserted at build time).
+     * @param string|null $replica_of The primary's instance name (for
+     *                       type=replica): the package srv/<replica_of>-<GUID>.
      * @param list<string> $dependencies Schema packages (pkg/<name>-<GUID>) in dependency order.
      */
     public function __construct(
@@ -32,7 +39,7 @@ final class DatabaseConfig implements \JsonSerializable
             throw new \InvalidArgumentException('binlog_expire_days requires binlog');
         }
         if ($this->type === 'replica' && $this->replica_of === null) {
-            throw new \InvalidArgumentException('type=replica requires replica_of (the primary database name)');
+            throw new \InvalidArgumentException('type=replica requires replica_of (the primary\'s instance name)');
         }
         if ($this->replica_ssl_verify_server_cert && $this->type !== 'replica') {
             throw new \InvalidArgumentException('replica_ssl_verify_server_cert is replica-only');

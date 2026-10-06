@@ -4,8 +4,9 @@ Package manager for MariaDB.
 
 ## Connectivity and machine mode
 
-`ema` resolves a database to its `[<dbname>]` section (the section header is
-the database name). `EMA_TARGET` is a **binary flag** telling ema whether the
+`ema` resolves a database to its `[<instance>]` section (the section header is
+the instance; `DBNAME` names the schema it serves). `EMA_TARGET` is a **binary
+flag** telling ema whether the
 connection is a sandbox database or a prod database — it is *not* a
 connection-file selector:
 
@@ -57,14 +58,15 @@ SSH path, so a section whose instance lives elsewhere — e.g. a primary's
 `SERVER`/`PORT`-only section recorded on the replica host — is reachable from any
 host that holds it. See `doc/system/mariadb-remote.md`.
 
-Prod databases get their own MariaDB instance, named after the database:
+Prod databases get their own MariaDB instance, named after the package:
 `ema create srv/<name>-<GUID>` provisions it (datadir/socket, an auto-picked
-TCP port, started under the host's `mariadb@<db>` systemd unit) and then
-creates the database and applies its schema. On success it emits the `[<dbname>]`
-connectivity section (`SERVER`/`PORT`/`MYSQL_UNIX_PORT`) for the
-operator to record in the consumer's manual reuter.ini; `ema values <db>`
-re-prints those values (recovery). The transport (e.g. ZeroTier) is whatever
-`SERVER` resolves to.
+TCP port, started under the host's `mariadb@<instance>` systemd unit) and then
+creates the database and applies its schema. On success it emits the
+`[<instance>]` connectivity section (`SERVER`/`PORT`/`MYSQL_UNIX_PORT`/`DBNAME` —
+the header is the instance, `DBNAME` the schema it serves) for the operator to
+record in the consumer's manual reuter.ini; `ema values <instance>` re-prints
+those values (recovery). The transport (e.g. ZeroTier) is whatever `SERVER`
+resolves to.
 
 Each instance's `[mysqld]` block also carries the host-level `ssl-ca` (and,
 optionally, `ssl-crl`) when `etc/ema.default.conf` or the optional
@@ -107,11 +109,14 @@ never appear in a database package.
 ### Read replicas
 
 A database package may instead declare `type: 'replica'` with
-`replica_of: <primary>`. `ema create srv/<name>-<GUID> --from-snapshot
-<path>` then restores the primary's shipped snapshot and attaches the replica
-over a low-priv `replication` account — no schema apply, `read_only=1`, and
-`replicate-rewrite-db=<primary>-><replica>`. The manual bootstrap that precedes
-it is documented in `doc/system/replica-bootstrap.md`.
+`replica_of: <primary>` (the primary's instance) and `dbname: <primary's
+schema>`. `ema create srv/<name>-<GUID> --from-snapshot <path>` then restores
+the primary's shipped snapshot and attaches the replica over a low-priv
+`replication` account — no schema apply, `read_only=1`. The replica serves the
+primary's schema under its own name (no `replicate-rewrite-db`), so its `dbname`
+must equal the primary package's `dbname` — a plain schema name both instances
+share (the naming convention lives in `doc/system/replica-bootstrap.md`). The
+manual bootstrap that precedes it is documented in that same file.
 
 A replica package may opt into verifying the primary's server certificate with
 `replica_ssl_verify_server_cert: true`. The key is replica-only (a
@@ -138,8 +143,8 @@ Shell and database lifecycle (each sandbox owns its instance under `var/sandbox/
 |---|---|
 | `ema sandbox srv/<name>-<GUID>` | Build a disposable per-instance sandbox for a database package (dev) |
 | `ema sandbox pkg/<pkg>-<GUID>` | Build a disposable sandbox for a schema package (synthesized db) |
-| `ema create srv/<name>-<GUID>` | Provision the per-database instance + create a prod database from a package (no users/grants) |
-| `ema values <db>` | Print a prod database's instance connectivity section (recovery) |
+| `ema create srv/<name>-<GUID>` | Provision the instance + create a prod database from a package (no users/grants) |
+| `ema values <instance>` | Print a prod instance's connectivity section (recovery) |
 | `ema mariadb <db> [args...]` | Open a MariaDB shell against a database's section (on the instance's host: its socket; off-host: TCP as `DBUSER`) |
 | `ema start` / `ema stop` / `ema restart` | Start/stop/restart sandbox instance(s), addressed by `var/sandbox/<name>-<GUID>` path (sandbox instances only) |
 | `ema status` | List sandbox instances and prod sections: up/down, endpoint, age, path |
@@ -176,11 +181,12 @@ refuses — `ema gc var/sandbox/<name>-<guid>` first, then recreate.
 `ema sandbox <target>` refuses when the sandbox instance already exists.
 `ema create srv/<name>-<GUID>` is the prod counterpart (it never consults
 `EMA_TARGET`): it refuses when the database already exists (checked via
-`information_schema.SCHEMATA`), and provisions the database's own instance
-(datadir/socket, auto-picked port, started under the host's `mariadb@<db>`
-unit) before creating the database and applying its schema.
-On success it prints the `[<dbname>]` section values to record in reuter.ini
-(see `ema values <db>`). `ema create -n`/`--dry-run` prints the SQL that would
+`information_schema.SCHEMATA`), and provisions the instance (datadir/socket,
+auto-picked port, started under the host's `mariadb@<instance>` unit) before
+creating the database and applying its schema.
+On success it prints the `[<instance>]` section values (`SERVER`/`PORT`/
+`MYSQL_UNIX_PORT`/`DBNAME`) to record in reuter.ini (see `ema values
+<instance>`). `ema create -n`/`--dry-run` prints the SQL that would
 run (bootstrap + dependency graph in topological order) without provisioning
 or running it. There is no upgrade/reapply surface by design: change a
 database with imperative SQL or delete + recreate.
