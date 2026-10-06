@@ -570,6 +570,7 @@ _cmd_mariadb() {
     local dbname="" _args=("$@")
     if [ "${#_args[@]}" -gt 0 ] && [[ "${_args[0]}" != -* ]]; then
         dbname="${_args[0]}"
+        _args=("${_args[@]:1}")
     fi
     _load_target "$dbname"
     if _is_sandbox || [[ -d "$_EMA_PROD_BASE/$dbname" ]]; then
@@ -587,7 +588,10 @@ _cmd_mariadb() {
         _offhost_connect "$dbname"
         _forward_dbpass
     fi
-    exec "$DBMS" -u "$_MARIADB_USER" "${_MARIADB_ARGS[@]}" "${_args[@]}"
+    # The default database is the loaded section's DBNAME (the schema the
+    # instance serves), not the instance name: a replica's instance differs
+    # from its schema, and selecting the instance fails with "Unknown database".
+    exec "$DBMS" -u "$_MARIADB_USER" "${_MARIADB_ARGS[@]}" "$DBNAME" "${_args[@]}"
 }
 
 # <prefix> + 14 random base36 chars -- schematic's type-prefixed GUID
