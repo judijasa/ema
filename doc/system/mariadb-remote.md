@@ -1,6 +1,6 @@
 # Reaching a prod database from another host
 
-How `ema mariadb <db>` connects when the instance is not on the machine you run
+How `ema mdb <db>` connects when the instance is not on the machine you run
 it from. ema keeps its prod admin path on the instance's own host — root over
 the instance socket — and reaches an instance that lives elsewhere over TCP as
 an explicit SQL user. There is no SSH hop and no remote root path.
@@ -13,7 +13,7 @@ in the connection file, `REUTER_INI` / `etc/reuter.ini`):
 ```bash
 export DBUSER=<sql user>       # required off-host
 export DBPASS=<password>       # only if the account has one
-ema mariadb <db>
+ema mdb <db>
 ```
 
 `DBPASS` is ema's knob: it is handed to the client as `MYSQL_PWD` (environment,
@@ -81,7 +81,7 @@ account decides.
 ema never asks for a password: it adds no `-p` and makes no probing connection,
 so the client runs exactly once, with the caller's own args, streaming its own
 stderr. A password therefore has to arrive through `DBPASS`, `MYSQL_PWD` or
-`~/.my.cnf` — non-interactive use (`ema mariadb <db> < file.sql`, cron) included,
+`~/.my.cnf` — non-interactive use (`ema mdb <db> < file.sql`, cron) included,
 where a prompt would have nowhere to read from anyway. A password that *was*
 supplied and rejected is reported as it comes.
 

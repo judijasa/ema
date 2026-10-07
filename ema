@@ -22,7 +22,7 @@ Database lifecycle & shell:
   values <db>                 Print a prod database's instance connectivity (recovery)
   sandbox srv/<name>-<GUID>   Build a disposable per-instance sandbox (create-only)
   sandbox pkg/<pkg>-<GUID>    Build a disposable sandbox for a schema package
-  mariadb <db> [args...]      Open a MariaDB shell against a database's section
+  mdb <db> [args...]          Open a MariaDB shell against a database's section
   start [<path>]              Start sandbox instance(s) (var/sandbox)
   stop [<path>]               Stop sandbox instance(s)
   restart [<path>]            Restart sandbox instance(s)
@@ -43,7 +43,7 @@ Run '$PROGRAM_NAME <command> --help' for per-command help.
 
 Environment:
   EMA_TARGET             sandbox or prod (default) — connection flag for the
-                         dbname-addressed verb (mariadb)
+                         dbname-addressed verb (mdb)
   REUTER_INI             Prod reuter.ini path (used when EMA_TARGET=prod)
   DBUSER                 CLI client user for a prod TCP connection (default: \$USER);
                          required when the instance is not on this host
@@ -90,7 +90,7 @@ _find_package() {
 
 # --- target & connection resolution -----------------------------------------
 # EMA_TARGET is a binary sandbox/prod flag telling ema whether the
-# dbname-addressed verb (mariadb) resolves a sandbox connection — the
+# dbname-addressed verb (mdb) resolves a sandbox connection — the
 # per-instance var/sandbox/<name>-<guid>/reuter.ini — or a prod one:
 # REUTER_INI, fallback etc/reuter.ini. Everything else resolves its own target:
 # 'sandbox' (build + lifecycle), 'create'/'values' and the path-addressed
@@ -134,7 +134,7 @@ _sandbox_ini()  { echo "var/sandbox/$1/reuter.ini"; }
 
 # Resolve a name-addressed ref (a bare dbname, or a full <name>-<GUID>) to its
 # sandbox instance key. This is the dbname-addressed path (_reuter_file, for
-# 'ema mariadb <db>'); the lifecycle verbs address an instance by path instead,
+# 'ema mdb <db>'); the lifecycle verbs address an instance by path instead,
 # via _resolve_instance_path.
 # Prints the key; returns 1 when no instance exists; errors on ambiguity.
 _resolve_instance() {
@@ -186,7 +186,7 @@ _prod_reuter_file() { echo "${REUTER_INI:-etc/reuter.ini}"; }
 # The connection file for a database under flag-driven resolution:
 #   sandbox -> the per-instance var/sandbox/<name>-<guid>/reuter.ini
 #   prod    -> $REUTER_INI (fallback etc/reuter.ini)
-# Only the dbname-addressed verb (mariadb) uses this; every other verb
+# Only the dbname-addressed verb (mdb) uses this; every other verb
 # resolves its file directly.
 _reuter_file() {
     local dbname="${1:-}"
@@ -207,7 +207,7 @@ _reuter_file() {
 # (SERVER/PORT/MYSQL_UNIX_PORT/DBNAME). The header IS the instance; DBNAME is
 # the schema the instance serves (falling back to the header when absent). The
 # caller picks the file: _prod_reuter_file / _sandbox_ini for the one-sided
-# verbs, the flag-driven _reuter_file for the name-addressed verb (mariadb).
+# verbs, the flag-driven _reuter_file for the name-addressed verb (mdb).
 _load_section() {
     local reuter="$1" section="$2"
     if [[ -z "$section" ]]; then
@@ -508,11 +508,11 @@ EOD
 
 _help_mariadb() {
     cat <<'HELP'
-Usage: ema mariadb <db> [args...]
+Usage: ema mdb <db> [args...]
 
 Open a MariaDB shell against a database's section. Extra args are passed
-through to the client (e.g. ema mariadb test -e "SHOW TABLES;"). Raw SQL
-from a file uses stdin redirection: ema mariadb <db> < file.sql
+through to the client (e.g. ema mdb test -e "SHOW TABLES;"). Raw SQL
+from a file uses stdin redirection: ema mdb <db> < file.sql
 
 The section is reached wherever its instance lives: on the instance's own host
 the section's socket is used as root (unix_socket auth); anywhere else the
@@ -780,18 +780,18 @@ EOF
 # print the command instead. When stdin is not a terminal (pipes, CI), print
 # the command too so scripts never block. The sandbox build has already loaded
 # its own connection (see _sandbox_build), so the client is opened in-process
-# with those args rather than through 'ema mariadb' — which is EMA_TARGET-driven
+# with those args rather than through 'ema mdb' — which is EMA_TARGET-driven
 # and would not find the instance.
 _maybe_open_shell() {
     local dbname="$1" no_shell
     no_shell=$(_get_flag --no-shell -n no_shell)
     if [[ "$no_shell" == "yes" ]]; then
-        echo "Run: EMA_TARGET=sandbox ema mariadb $dbname"
+        echo "Run: EMA_TARGET=sandbox ema mdb $dbname"
     elif [[ -t 0 ]]; then
         echo "Opening shell for $dbname (use -n/--no-shell to skip)..."
         exec "$DBMS" -u root "${_MARIADB_ARGS[@]}"
     else
-        echo "Run: EMA_TARGET=sandbox ema mariadb $dbname"
+        echo "Run: EMA_TARGET=sandbox ema mdb $dbname"
     fi
 }
 
@@ -1549,7 +1549,7 @@ Create-only: re-running against an existing instance refuses ("already built —
 policy and are never created by ema.
 
 Flags:
-  -n, --no-shell      Print 'ema mariadb <db>' instead of opening the shell
+  -n, --no-shell      Print 'ema mdb <db>' instead of opening the shell
   -q, --quiet         Suppress non-error output
 HELP
 }
@@ -2092,7 +2092,7 @@ case "$1" in
         shift
         _cmd_database "$@"
         ;;
-    mariadb)
+    mdb)
         shift
         _cmd_mariadb "$@"
         ;;
