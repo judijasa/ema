@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Resolve the real location of this script so _EMA_LIB self-locates whether
 # run in-tree, or via the Composer `vendor/bin/ema` symlink. EMA_LIB (env)
