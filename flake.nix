@@ -11,6 +11,9 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
+        bashPkg = pkgs.bash;
+        jqPkg = pkgs.jq;
+        mariadbPkg = pkgs.mariadb_118;
         phpPkg = pkgs.php84.withExtensions ({ all, enabled }:
           enabled ++ [
             all.mysqli
@@ -20,10 +23,9 @@
         phpComposer = pkgs.php84Packages.composer.override {
           php = phpPkg;
         };
-        jqPkg = pkgs.jq;
-        mariadbPkg = pkgs.mariadb_118;
 
         commonPackages = [
+          bashPkg
           jqPkg
           phpPkg
         ];
