@@ -229,9 +229,9 @@ _load_section() {
             echo \$k . '=' . escapeshellarg(\$v) . PHP_EOL;
     ") || exit 1
     # The section is authoritative: clear any ambient connection vars first so
-    # an exported value (e.g. MYSQL_UNIX_PORT from the dev shell) cannot leak
-    # into a section that does not define it.
-    unset SERVER PORT DBNAME MYSQL_UNIX_PORT
+    # an exported value (e.g. MYSQL_UNIX_PORT from the dev shell, or
+    # SSL_VERIFY_SERVER_CERT) cannot leak into a section that does not define it.
+    unset SERVER PORT DBNAME MYSQL_UNIX_PORT SSL_VERIFY_SERVER_CERT
     eval "$vars"
     # The database this instance serves: the section's DBNAME, defaulting to the
     # header when the section omits it (a primary's section may omit it — the
@@ -247,10 +247,16 @@ _load_target() {
     _load_section "$reuter" "$dbname"
 }
 
+# The client's transport args for the loaded section: its socket when it has
+# one, else its TCP endpoint. _MARIADB_TCP records which of the two was chosen,
+# so a caller that has to know the protocol (the TLS posture) need not re-derive
+# the choice from the section's keys.
 _mariadb_args() {
     if [[ -n "${MYSQL_UNIX_PORT:-}" ]]; then
+        _MARIADB_TCP="no"
         _MARIADB_ARGS=("--socket=$MYSQL_UNIX_PORT")
     else
+        _MARIADB_TCP="yes"
         _MARIADB_ARGS=("-h" "$SERVER")
         [[ -n "${PORT:-}" ]] && _MARIADB_ARGS+=("-P" "$PORT")
     fi
@@ -529,7 +535,8 @@ HELP
 # that exists on the instance's host, not here. DBUSER is required: ema never
 # reaches an off-host instance as root, because root is a socket-auth identity
 # (unix_socket maps the OS user) and this machine is not the instance's host.
-# Sets _MARIADB_ARGS/_MARIADB_USER for _cmd_mariadb's client invocation.
+# Sets _MARIADB_ARGS/_MARIADB_USER/_MARIADB_TCP for _cmd_mariadb's client
+# invocation.
 _offhost_connect() {
     local dbname="$1"
     if [[ -z "${SERVER:-}" ]]; then
@@ -544,6 +551,7 @@ _offhost_connect() {
         echo "Error: section '$dbname' is not on this host; set DBUSER to the SQL user to connect as" >&2
         exit 1
     fi
+    _MARIADB_TCP="yes"
     _MARIADB_ARGS=(-h "$SERVER" -P "$PORT")
     _MARIADB_USER="$DBUSER"
     echo "$dbname is not on this host; connecting over tcp to $SERVER:$PORT as $DBUSER" >&2
@@ -559,6 +567,29 @@ _forward_dbpass() {
     if [[ -n "${DBPASS:-}" ]]; then
         export MYSQL_PWD="$DBPASS"
     fi
+}
+
+# The section's server-verification posture, stated to the client instead of
+# left to the client's own default: over TCP, with no password and no CA, that
+# default disables verification and announces it as a warning. The key is the
+# app layer's SSL_VERIFY_SERVER_CERT and is read with the app layer's own
+# vocabulary (its serverVerification()): absent or empty means verify, and
+# 0/false/no/off — trimmed, case-insensitive — opts out. Verifying names the CA
+# the app layer also verifies against, so it is stated only when SSL_DIR — the
+# env var the app layer derives its cert paths from — is set; the opt-out needs
+# nothing but the flag. A socket connection carries no TLS and states nothing.
+# The caller's own args land after these, so a caller can still override.
+_forward_ssl_verify() {
+    [[ "${_MARIADB_TCP:-no}" == "yes" ]] || return 0
+    local posture
+    read -r posture <<<"${SSL_VERIFY_SERVER_CERT:-}"  # read trims surrounding blanks
+    case "${posture,,}" in
+        0|false|no|off)
+            _MARIADB_ARGS+=("--skip-ssl-verify-server-cert") ;;
+        *)
+            [[ -n "${SSL_DIR:-}" ]] || return 0
+            _MARIADB_ARGS+=("--ssl-ca=$SSL_DIR/ca.crt" "--ssl-verify-server-cert") ;;
+    esac
 }
 
 _cmd_mariadb() {
@@ -583,10 +614,12 @@ _cmd_mariadb() {
         else
             _MARIADB_USER="${DBUSER:-$USER}"
             _forward_dbpass
+            _forward_ssl_verify
         fi
     else
         _offhost_connect "$dbname"
         _forward_dbpass
+        _forward_ssl_verify
     fi
     # The default database is the loaded section's DBNAME (the schema the
     # instance serves), not the instance name: a replica's instance differs

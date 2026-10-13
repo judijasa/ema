@@ -88,6 +88,22 @@ supplied and rejected is reported as it comes.
 `DBPASS` applies to the `DBUSER` connections — the prod paths, socket or TCP.
 The sandbox root path authenticates by OS user (`unix_socket`) and ignores it.
 
+## Server verification
+
+Whether the client verifies the *server's* certificate is the section's choice,
+stated to the client instead of left to the client's own default: over TCP, a
+passwordless login at that default makes the client disable verification and
+announce it as a warning.
+
+| `SSL_VERIFY_SERVER_CERT` in the section | what the client is given |
+|---|---|
+| absent or empty — verify | `--ssl-ca=<SSL_DIR>/ca.crt --ssl-verify-server-cert`, the CA the app layer verifies against, from the same `SSL_DIR` it derives its cert paths from. With `SSL_DIR` unset there is no CA to name, so nothing is stated and the client resolves the posture alone |
+| `0`, `false`, `no`, `off` (trimmed, case-insensitive) — opt out | `--skip-ssl-verify-server-cert`, for a server certificate with no CA behind it yet |
+
+The vocabulary is the app layer's own, so the key means here what it means
+there. A socket connection carries no TLS and states nothing, and args after
+`<db>` are appended last, so a caller can still override either choice.
+
 ## Sections whose instance is elsewhere
 
 A section recorded with a TCP `SERVER`/`PORT` only — the primary's section on
