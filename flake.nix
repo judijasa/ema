@@ -11,7 +11,9 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
-        bashPkg = pkgs.bash;
+        # readline: fixes arrow keys in nix shell on NixOS (without it, arrows produce escape sequences)
+        # ncurses: together with readline, it fixes arrow keys in nix shell + tmux on NixOS
+        bashPkg = pkgs.bashInteractive;  # Includes readline + ncurses
         jqPkg = pkgs.jq;
         mariadbPkg = pkgs.mariadb_118;
         phpPkg = pkgs.php84.withExtensions ({ all, enabled }:
@@ -37,6 +39,9 @@
             phpComposer
           ];
           shellHook = ''
+            # Set SHELL to bashInteractive so tmux uses bash with readline support
+            export SHELL="${pkgs.bashInteractive}/bin/bash"
+
             . ./bin/dev/shell-enter.sh ema
 
             # Customize the prompt (PS1)
