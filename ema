@@ -1844,13 +1844,13 @@ _status_table() {
 
 _status_sandbox() {
     if [[ ! -d "var/sandbox" ]]; then
-        echo "No sandbox instances."
+        echo "None"
         return
     fi
     local dirs=() keys=() rows=() dir key
     mapfile -t dirs < <(ls -d var/sandbox/*/ 2>/dev/null)
     if [[ ${#dirs[@]} -eq 0 ]]; then
-        echo "No sandbox instances."
+        echo "None"
         return
     fi
     for dir in "${dirs[@]}"; do
@@ -1879,7 +1879,7 @@ _status_sandbox() {
 # prod instance.
 _status_prod() {
     if [[ ! -d "$_EMA_PROD_BASE" ]]; then
-        echo "No prod instances."
+        echo "None"
         return
     fi
     local dirs=() rows=() dir name state path
@@ -1896,7 +1896,7 @@ _status_prod() {
         rows+=("$state"$'\t'"-"$'\t'"$path")
     done
     if [[ ${#rows[@]} -eq 0 ]]; then
-        echo "No prod instances."
+        echo "None"
         return
     fi
     _status_table "${rows[@]}"
