@@ -1767,7 +1767,7 @@ _cmd_gc() {
             exit 1
         fi
         rm -rf "var/sandbox/$one"
-        [[ "$quiet" == "no" ]] && echo "gc: removed var/sandbox/$one"
+        [[ "$quiet" == "no" ]] && echo "removed"
         return
     fi
     if [[ ! -d "var/sandbox" ]]; then
@@ -1779,12 +1779,12 @@ _cmd_gc() {
     for dirs in "${keys[@]}"; do
         key=$(basename "$dirs")
         if _sandbox_up "$key"; then
-            [[ "$verbose" == "yes" ]] && echo "gc: skipping running instance '$key'" >&2
+            [[ "$verbose" == "yes" ]] && echo "skipping running instance '$key'" >&2
             continue
         fi
         found="yes"
         rm -rf "var/sandbox/$key"
-        [[ "$quiet" == "no" ]] && echo "gc: removed var/sandbox/$key"
+        [[ "$quiet" == "no" ]] && echo "removed"
     done
     if [[ "$found" == "no" && "$quiet" == "no" ]]; then
         echo "Nothing to gc."
