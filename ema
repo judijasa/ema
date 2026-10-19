@@ -26,7 +26,7 @@ Database lifecycle & shell:
   start [<path>]              Start sandbox instance(s) (var/sandbox)
   stop [<path>]               Stop sandbox instance(s)
   restart [<path>]            Restart sandbox instance(s)
-  status                      List sandbox instances + prod sections with state
+  status                      List local sandbox + prod instances with state
   gc [<path>]                 Remove stopped sandbox instances under var/sandbox
 
 Schema packages:
@@ -1795,17 +1795,18 @@ _help_status() {
     cat <<'HELP'
 Usage: ema status [flags]
 
-List both sides with state:
-  sandbox instances: each var/sandbox/<name>-<guid>/ instance, its server
-                     up/down, socket endpoint, the age of its reuter.ini, and
-                     the instance path
-  prod sections:     the prod reuter file's sections, each with its
-                     reachability (TCP port, or the socket file for sections
-                     that define MYSQL_UNIX_PORT) and the local instance path
-                     when the instance exists on this host ('-' otherwise)
+List the local instances with state, from on-disk evidence (never a
+connection config):
 
-The trailing path is the address the lifecycle verbs (start/stop/restart/gc)
-take.
+  sandbox instances: each var/sandbox/<name>-<guid>/ instance — its server
+                     up/down (pid file), the age of its reuter.ini, and the
+                     instance path
+  prod instances:    each $EMA_PROD_BASE/<name>/ instance provisioned on this
+                     host — its server up/down (the mariadb@<name> systemd
+                     unit) and the instance path
+
+The trailing path is the address the sandbox lifecycle verbs
+(start/stop/restart/gc) take.
 
 Flags:
   -v, --verbose     Verbose output to stderr
@@ -1825,28 +1826,19 @@ _cmd_status() {
     echo "Sandbox instances:"
     _status_sandbox
     echo
-    echo "Prod sections ($(_prod_reuter_file)):"
+    echo "Prod instances:"
     _status_prod
 }
 
-# Both status sections print through _status_table: rows are tab-separated (key,
-# state, endpoint, age, path — none of them ever empty), and the key and endpoint
-# columns are sized to their longest value so the header labels sit above their
-# column instead of the rows drifting away from them.
+# Both status sections print through _status_table: rows are tab-separated
+# (state, age, path — none of them ever empty). The path is the address and its
+# trailing component is the instance, so there is no separate key column.
 _status_table() {
-    local rows=("$@") row key state endpoint age path
-    local key_width=3 endpoint_width=8      # the "KEY"/"ENDPOINT" labels themselves
+    local rows=("$@") row state age path
+    printf '%-2s  %-6s  %s\n' ST AGE PATH
     for row in "${rows[@]}"; do
-        IFS=$'\t' read -r key state endpoint age path <<< "$row"
-        (( ${#key} > key_width )) && key_width=${#key}
-        (( ${#endpoint} > endpoint_width )) && endpoint_width=${#endpoint}
-    done
-    printf '[%-*s]  %-2s  %-*s  %-6s  %s\n' \
-        "$key_width" KEY ST "$endpoint_width" ENDPOINT AGE PATH
-    for row in "${rows[@]}"; do
-        IFS=$'\t' read -r key state endpoint age path <<< "$row"
-        printf '[%-*s]  %-2s  %-*s  %-6s  %s\n' \
-            "$key_width" "$key" "$state" "$endpoint_width" "$endpoint" "$age" "$path"
+        IFS=$'\t' read -r state age path <<< "$row"
+        printf '%-2s  %-6s  %s\n' "$state" "$age" "$path"
     done
 }
 
@@ -1864,7 +1856,7 @@ _status_sandbox() {
     for dir in "${dirs[@]}"; do
         keys+=("$(basename "$dir")")
     done
-    local pid state endpoint age ini
+    local pid state age ini
     for key in "${keys[@]}"; do
         ini="$(_sandbox_ini "$key")"
         pid="$(_sandbox_pid_value "$key")"
@@ -1873,53 +1865,40 @@ _status_sandbox() {
         else
             state="dn"
         fi
-        endpoint="socket $(_sandbox_sock "$key")"
         age="$(_age "$ini")"
-        rows+=("$key"$'\t'"$state"$'\t'"$endpoint"$'\t'"$age"$'\t'"$(_sandbox_dir "$key")")
+        rows+=("$state"$'\t'"$age"$'\t'"$(_sandbox_dir "$key")")
     done
     _status_table "${rows[@]}"
 }
 
+# Enumerate the prod instances ema provisioned on THIS host from their on-disk
+# evidence — the instance directory $EMA_PROD_BASE/<name>/ (with its data/
+# datadir) — never from etc/reuter.ini, a consumer-recorded connectivity config
+# that can be absent, stale, or list instances on other hosts. State is the
+# instance's mariadb@<name> systemd unit, the only thing that starts/stops a
+# prod instance.
 _status_prod() {
-    local reuter
-    reuter="$(_prod_reuter_file)"
-    if [[ ! -f "$reuter" ]]; then
-        echo "No prod sections: $reuter not found."
+    if [[ ! -d "$_EMA_PROD_BASE" ]]; then
+        echo "No prod instances."
         return
     fi
-    local names
-    names=$(php -r "
-        \$cnf = parse_ini_file('${reuter}', true);
-        if (!\$cnf) exit(0);
-        foreach (array_keys(\$cnf) as \$k) echo \$k, PHP_EOL;
-    ") || exit 1
-    if [[ -z "$names" ]]; then
-        echo "No sections in $reuter."
-        return
-    fi
-    local name names_list=() rows=()
-    mapfile -t names_list <<< "$names"
-    local vars endpoint state
-    for name in "${names_list[@]}"; do
-        [[ -z "$name" ]] && continue
-        vars=$(php -r "
-            \$cnf = parse_ini_file('${reuter}', true);
-            foreach (['SERVER','PORT','MYSQL_UNIX_PORT'] as \$k)
-                if (isset(\$cnf['${name}'][\$k])) echo \$k, '=', escapeshellarg(\$cnf['${name}'][\$k]), PHP_EOL;
-        ")
-        eval "$vars"
-        if [[ -n "${MYSQL_UNIX_PORT:-}" ]]; then
-            endpoint="socket $MYSQL_UNIX_PORT"
-            if [[ -S "$MYSQL_UNIX_PORT" ]]; then state="up"; else state="dn"; fi
+    local dirs=() rows=() dir name state path
+    mapfile -t dirs < <(ls -d "$_EMA_PROD_BASE"/*/ 2>/dev/null)
+    for dir in "${dirs[@]}"; do
+        [[ -d "$dir/data" ]] || continue
+        name="$(basename "$dir")"
+        path="$_EMA_PROD_BASE/$name"
+        if systemctl is-active --quiet "$(_prod_unit "$name")" 2>/dev/null; then
+            state="up"
         else
-            endpoint="${SERVER:-?}:${PORT:-?}"
-            if timeout 2 bash -c "</dev/tcp/$SERVER/$PORT" 2>/dev/null; then state="up"; else state="dn"; fi
+            state="dn"
         fi
-        local path="$_EMA_PROD_BASE/$name"
-        [[ -d "$path" ]] || path="-"
-        rows+=("$name"$'\t'"$state"$'\t'"$endpoint"$'\t'"-"$'\t'"$path")
-        unset SERVER PORT MYSQL_UNIX_PORT
+        rows+=("$state"$'\t'"-"$'\t'"$path")
     done
+    if [[ ${#rows[@]} -eq 0 ]]; then
+        echo "No prod instances."
+        return
+    fi
     _status_table "${rows[@]}"
 }
 

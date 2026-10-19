@@ -147,7 +147,7 @@ Shell and database lifecycle (each sandbox owns its instance under `var/sandbox/
 | `ema values <instance>` | Print a prod instance's connectivity section (recovery) |
 | `ema mdb <db> [args...]` | Open a MariaDB shell against a database's section (on the instance's host: its socket; off-host: TCP as `DBUSER`) |
 | `ema start` / `ema stop` / `ema restart` | Start/stop/restart sandbox instance(s), addressed by `var/sandbox/<name>-<GUID>` path (sandbox instances only) |
-| `ema status` | List sandbox instances and prod sections: up/down, endpoint, age, path |
+| `ema status` | List local sandbox and prod instances: up/down, age, path |
 | `ema gc [<path>]` | Remove stopped sandbox instance(s) under `var/sandbox/` (sandbox instances only) |
 
 Schema packages:
