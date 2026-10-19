@@ -828,19 +828,19 @@ EOF
 # The shell runs as a child (not exec) so that, once it exits, ema can ask
 # whether to delete the instance (see _sandbox_remove_or_keep).
 _maybe_open_shell() {
-    local dbname="$1" key="$2" no_shell quiet status
+    local instance="$1" key="$2" no_shell quiet status
     no_shell=$(_get_flag --no-shell -n no_shell)
     quiet=$(_get_flag --quiet -q quiet)
     if [[ "$no_shell" == "yes" ]]; then
-        echo "Run: EMA_TARGET=sandbox ema mdb $dbname"
+        echo "Run: EMA_TARGET=sandbox ema mdb $instance"
     elif [[ -t 0 ]]; then
-        echo "Opening shell for $dbname (use -n/--no-shell to skip)..."
+        echo "Opening shell for $instance (use -n/--no-shell to skip)..."
         "$DBMS" -u root "${_MARIADB_ARGS[@]}"
         status=$?
         _sandbox_remove_or_keep "$key" "$quiet" || status=1
         return "$status"
     else
-        echo "Run: EMA_TARGET=sandbox ema mdb $dbname"
+        echo "Run: EMA_TARGET=sandbox ema mdb $instance"
     fi
 }
 
@@ -1714,8 +1714,10 @@ _sandbox_build() {
     fi
     _sandbox_start "$key" "yes" || exit 1
     # The instance's own connection file (written by _write_sandbox_ini above):
-    # a sandbox build knows its side and never consults EMA_TARGET.
-    _load_section "$(_sandbox_ini "$key")" "$dbname"
+    # a sandbox build knows its side and never consults EMA_TARGET. The section
+    # header is the instance, not the schema — a primary may serve a dbname
+    # distinct from its instance name (e.g. simo0 serving simo).
+    _load_section "$(_sandbox_ini "$key")" "$(_instance_name "$key")"
     _mariadb_args
     workdir=$(mktemp -d /tmp/ema_bootstrap_XXXXXX)
     sql="${workdir}/bootstrap.sql"
@@ -1729,7 +1731,7 @@ _sandbox_build() {
     if [[ "${#deps[@]}" -gt 0 ]]; then
         _apply_pkg_graph "$dbname" "${deps[@]}"
     fi
-    _maybe_open_shell "$dbname" "$key"
+    _maybe_open_shell "$(_instance_name "$key")" "$key"
 }
 
 _help_gc() {
