@@ -824,17 +824,43 @@ EOF
 # its own connection (see _sandbox_build), so the client is opened in-process
 # with those args rather than through 'ema mdb' — which is EMA_TARGET-driven
 # and would not find the instance.
+#
+# The shell runs as a child (not exec) so that, once it exits, ema can ask
+# whether to delete the instance (see _sandbox_remove_or_keep).
 _maybe_open_shell() {
-    local dbname="$1" no_shell
+    local dbname="$1" key="$2" no_shell quiet status
     no_shell=$(_get_flag --no-shell -n no_shell)
+    quiet=$(_get_flag --quiet -q quiet)
     if [[ "$no_shell" == "yes" ]]; then
         echo "Run: EMA_TARGET=sandbox ema mdb $dbname"
     elif [[ -t 0 ]]; then
         echo "Opening shell for $dbname (use -n/--no-shell to skip)..."
-        exec "$DBMS" -u root "${_MARIADB_ARGS[@]}"
+        "$DBMS" -u root "${_MARIADB_ARGS[@]}"
+        status=$?
+        _sandbox_remove_or_keep "$key" "$quiet" || status=1
+        return "$status"
     else
         echo "Run: EMA_TARGET=sandbox ema mdb $dbname"
     fi
+}
+
+# _sandbox_remove_or_keep <key> <quiet> — after an interactive sandbox shell
+# exits, ask whether to delete the instance. Deleting is the default (empty or
+# EOF answer deletes it); answering no keeps var/sandbox/<key> in place
+# (remove it later with 'ema gc var/sandbox/<key>').
+_sandbox_remove_or_keep() {
+    local key="$1" quiet="$2"
+    if ! prompt_yesno "Remove sandbox instance '$key'?" yes; then
+        [[ "$quiet" == "yes" ]] || echo "Kept var/sandbox/$key (remove with 'ema gc var/sandbox/$key')."
+        return
+    fi
+    _sandbox_stop "$key" "yes"
+    if _sandbox_up "$key"; then
+        echo "Error: sandbox '$key' is still running — not removing it" >&2
+        return 1
+    fi
+    rm -rf "var/sandbox/$key"
+    [[ "$quiet" == "yes" ]] || echo "Removed var/sandbox/$key."
 }
 
 # --- prod per-database instances --------------------------------------------
@@ -1588,8 +1614,13 @@ A type=replica srv package is refused — a replica has no schema of its own
 (its schema arrives from the primary's snapshot).
 
 Create-only: re-running against an existing instance refuses ("already built —
-'ema gc var/sandbox/<key>' first"). Schema only — users/grants are consumer
-policy and are never created by ema.
+delete it to rebuild"). Schema only — users/grants are consumer policy and are
+never created by ema.
+
+When the interactive shell exits, ema asks whether to remove the instance
+(default: remove). Answering yes stops the server and deletes
+var/sandbox/<key>; answering no keeps it; with -n/--no-shell the shell is not
+opened, so no question is asked.
 
 Flags:
   -n, --no-shell      Print 'ema mdb <db>' instead of opening the shell
@@ -1670,7 +1701,7 @@ _sandbox_build() {
     fi
     datadir="$(_sandbox_data "$key")"
     if [[ -d "$datadir" ]]; then
-        echo "Error: sandbox '$key' already built — ema sandbox is create-only (run 'ema gc var/sandbox/$key' first)" >&2
+        echo "Error: sandbox '$key' already built — delete it to rebuild." >&2
         exit 1
     fi
     mkdir -p "$(_sandbox_dir "$key")"
@@ -1698,7 +1729,7 @@ _sandbox_build() {
     if [[ "${#deps[@]}" -gt 0 ]]; then
         _apply_pkg_graph "$dbname" "${deps[@]}"
     fi
-    _maybe_open_shell "$dbname"
+    _maybe_open_shell "$dbname" "$key"
 }
 
 _help_gc() {

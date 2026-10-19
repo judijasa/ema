@@ -170,7 +170,9 @@ where a verb provisions (`ema create`).
 
 `ema sandbox` builds a disposable sandbox and then opens a MariaDB shell on
 it; pass `-n/--no-shell` to print `EMA_TARGET=sandbox ema mdb <db>`
-instead.
+instead. When the interactive shell exits, ema asks whether to remove the
+instance (default: remove). Answering yes stops the server and deletes the
+whole `var/sandbox/<name>-<guid>/` directory; answering no keeps it.
 Non-terminal stdin (pipes, CI) always prints the command, so scripts never
 block. Raw SQL over a built sandbox uses stdin redirection —
 `ema mdb <db> < file.sql` — there is no dedicated `apply` verb.
