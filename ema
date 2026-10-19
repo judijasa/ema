@@ -112,9 +112,14 @@ _target() {
 _is_sandbox() { [[ "$(_target)" == "sandbox" ]]; }
 
 # Normalize a target ref (<name>-<GUID>, or an srv/... or pkg/... path) to the
-# bare instance key <name>-<GUID>.
+# bare instance key <name>-<GUID>. A trailing slash is tolerated: without this
+# the basename would be empty and every per-instance path would collapse onto
+# var/sandbox/ itself.
 _instance_key() {
     local ref="${1:-}"
+    while [[ "$ref" == */ ]]; do
+        ref="${ref%/}"
+    done
     echo "${ref##*/}"
 }
 
@@ -254,7 +259,10 @@ _load_target() {
 _mariadb_args() {
     if [[ -n "${MYSQL_UNIX_PORT:-}" ]]; then
         _MARIADB_TCP="no"
-        _MARIADB_ARGS=("--socket=$MYSQL_UNIX_PORT")
+        # A unix socket is machine-local and already authenticated by the OS;
+        # never present a client cert from the user's ~/.my.cnf here (a local
+        # instance without a CA would reject it with "unknown ca").
+        _MARIADB_ARGS=("--socket=$MYSQL_UNIX_PORT" "--skip-ssl")
     else
         _MARIADB_TCP="yes"
         _MARIADB_ARGS=("-h" "$SERVER")
@@ -437,8 +445,9 @@ _sandbox_stop() {
         return
     fi
     # Graceful shutdown via mariadb-admin over the sandbox socket; fall back to
-    # SIGTERM on the pid, then SIGKILL if it does not exit.
-    if ! mariadb-admin -u root --socket="$(_sandbox_sock "$key")" shutdown >/dev/null 2>&1; then
+    # SIGTERM on the pid, then SIGKILL if it does not exit. --skip-ssl: a local
+    # socket must not present the user's ~/.my.cnf client cert.
+    if ! mariadb-admin --skip-ssl -u root --socket="$(_sandbox_sock "$key")" shutdown >/dev/null 2>&1; then
         kill "$pid" 2>/dev/null || true
     fi
     local i
@@ -1222,6 +1231,7 @@ _cmd_create() {
     local ref defs dbname instance srv_dir deps_json
     local -a deps=()
     ref="${target#srv/}"
+    ref="${ref%/}"
     defs="$(_srv_definition "$ref")" || exit 1
     # The instance is the package name (<name> from srv/<name>-<GUID>); dbname
     # is the schema it serves. For a primary the two are equal today; only a
@@ -1652,6 +1662,12 @@ _sandbox_build() {
     shift 3
     local deps=("$@")
     local datadir workdir sql
+    # The key is the instance directory under var/sandbox/; an empty one would
+    # put the datadir/socket/ini at the sandbox root and poison every instance.
+    if [[ -z "$key" ]]; then
+        echo "Error: target has no instance key (expected srv/<name>-<GUID> or pkg/<pkg>-<GUID>)" >&2
+        exit 1
+    fi
     datadir="$(_sandbox_data "$key")"
     if [[ -d "$datadir" ]]; then
         echo "Error: sandbox '$key' already built — ema sandbox is create-only (run 'ema gc var/sandbox/$key' first)" >&2
