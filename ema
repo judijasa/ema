@@ -138,7 +138,7 @@ _sandbox_sock() { echo "var/sandbox/$1/mysql.sock"; }
 _sandbox_ini()  { echo "var/sandbox/$1/reuter.ini"; }
 
 # Resolve a name-addressed ref (a bare dbname, or a full <name>-<GUID>) to its
-# sandbox instance key. This is the dbname-addressed path (_reuter_file, for
+# sandbox instance key. This is the dbname-addressed path (_load_target, for
 # 'ema mdb <db>'); the lifecycle verbs address an instance by path instead,
 # via _resolve_instance_path.
 # Prints the key; returns 1 when no instance exists; errors on ambiguity.
@@ -188,31 +188,11 @@ _resolve_instance_path() {
 # directly by the verbs that are inherently prod (create/values).
 _prod_reuter_file() { echo "${REUTER_INI:-etc/reuter.ini}"; }
 
-# The connection file for a database under flag-driven resolution:
-#   sandbox -> the per-instance var/sandbox/<name>-<guid>/reuter.ini
-#   prod    -> $REUTER_INI (fallback etc/reuter.ini)
-# Only the dbname-addressed verb (mdb) uses this; every other verb
-# resolves its file directly.
-_reuter_file() {
-    local dbname="${1:-}"
-    if _is_sandbox; then
-        local key
-        key="$(_resolve_instance "$dbname")" || exit 1
-        if [[ -z "$key" ]]; then
-            echo "Error: no sandbox instance for '$dbname' (run 'ema sandbox srv/<name>-<GUID>' first)" >&2
-            exit 1
-        fi
-        echo "$(_sandbox_ini "$key")"
-    else
-        echo "${REUTER_INI:-etc/reuter.ini}"
-    fi
-}
-
 # Load the [<section>] section of <reuter> into the connection vars
 # (SERVER/PORT/MYSQL_UNIX_PORT/DBNAME). The header IS the instance; DBNAME is
 # the schema the instance serves (falling back to the header when absent). The
 # caller picks the file: _prod_reuter_file / _sandbox_ini for the one-sided
-# verbs, the flag-driven _reuter_file for the name-addressed verb (mdb).
+# verbs, the flag-driven _load_target for the name-addressed verb (mdb).
 _load_section() {
     local reuter="$1" section="$2"
     if [[ -z "$section" ]]; then
@@ -245,10 +225,24 @@ _load_section() {
 }
 
 # Flag-driven load: pick the connection file for <dbname> (the sandbox
-# instance's ini vs the prod file), then load its section.
+# instance's ini vs the prod file), then load its section. On the sandbox side
+# it records the instance key in _LOADED_SANDBOX_KEY (empty on prod) so a
+# caller that must act on the instance after the client exits need not resolve
+# it twice.
 _load_target() {
-    local dbname="$1" reuter
-    reuter="$(_reuter_file "$dbname")" || exit 1
+    local dbname="$1" reuter key
+    _LOADED_SANDBOX_KEY=""
+    if _is_sandbox; then
+        key="$(_resolve_instance "$dbname")" || exit 1
+        if [[ -z "$key" ]]; then
+            echo "Error: no sandbox instance for '$dbname' (run 'ema sandbox srv/<name>-<GUID>' first)" >&2
+            exit 1
+        fi
+        _LOADED_SANDBOX_KEY="$key"
+        reuter="$(_sandbox_ini "$key")"
+    else
+        reuter="${REUTER_INI:-etc/reuter.ini}"
+    fi
     _load_section "$reuter" "$dbname"
 }
 
@@ -529,6 +523,10 @@ Open a MariaDB shell against a database's section. Extra args are passed
 through to the client (e.g. ema mdb test -e "SHOW TABLES;"). Raw SQL
 from a file uses stdin redirection: ema mdb <db> < file.sql
 
+With EMA_TARGET=sandbox, an interactive shell asks whether to remove the
+instance when it exits (default: remove). Scripted invocations (extra args or
+redirected stdin) never prompt.
+
 The section is reached wherever its instance lives: on the instance's own host
 the section's socket is used as root (unix_socket auth); anywhere else the
 section's SERVER/PORT is used over TCP as DBUSER, which is required off-host.
@@ -633,6 +631,18 @@ _cmd_mariadb() {
     # The default database is the loaded section's DBNAME (the schema the
     # instance serves), not the instance name: a replica's instance differs
     # from its schema, and selecting the instance fails with "Unknown database".
+    #
+    # An interactive sandbox shell runs as a child so ema survives the client's
+    # exit and asks whether to remove the instance, exactly as after the shell
+    # `ema sandbox` opens. Passthrough args (-e, batch flags) and non-terminal
+    # stdin are scripted sessions: keep exec so the client owns the process.
+    if [[ -n "$_LOADED_SANDBOX_KEY" && ${#_args[@]} -eq 0 && -t 0 ]]; then
+        local quiet status
+        quiet=$(_get_flag --quiet -q quiet)
+        _run_sandbox_shell "$_LOADED_SANDBOX_KEY" "$quiet" "$DBNAME"
+        status=$?
+        exit "$status"
+    fi
     exec "$DBMS" -u "$_MARIADB_USER" "${_MARIADB_ARGS[@]}" "$DBNAME" "${_args[@]}"
 }
 
@@ -818,6 +828,18 @@ COLLATE = '${collation}';
 EOF
 }
 
+# Run an interactive client against the loaded sandbox instance as a child,
+# then ask whether to remove the instance. The child (not exec) is what lets
+# ema survive the client's exit and prompt; callers pass the client's default
+# database and any args after the key/quiet pair.
+_run_sandbox_shell() {
+    local key="$1" quiet="$2"; shift 2
+    "$DBMS" -u root "${_MARIADB_ARGS[@]}" "$@"
+    local status=$?
+    _sandbox_remove_or_keep "$key" "$quiet" || status=1
+    return "$status"
+}
+
 # After a successful init, open the shell unless -n/--no-shell, in which case
 # print the command instead. When stdin is not a terminal (pipes, CI), print
 # the command too so scripts never block. The sandbox build has already loaded
@@ -826,19 +848,16 @@ EOF
 # and would not find the instance.
 #
 # The shell runs as a child (not exec) so that, once it exits, ema can ask
-# whether to delete the instance (see _sandbox_remove_or_keep).
+# whether to delete the instance (see _run_sandbox_shell).
 _maybe_open_shell() {
-    local instance="$1" key="$2" no_shell quiet status
+    local instance="$1" key="$2" no_shell quiet
     no_shell=$(_get_flag --no-shell -n no_shell)
     quiet=$(_get_flag --quiet -q quiet)
     if [[ "$no_shell" == "yes" ]]; then
         echo "Run: EMA_TARGET=sandbox ema mdb $instance"
     elif [[ -t 0 ]]; then
         echo "Opening shell for $instance (use -n/--no-shell to skip)..."
-        "$DBMS" -u root "${_MARIADB_ARGS[@]}"
-        status=$?
-        _sandbox_remove_or_keep "$key" "$quiet" || status=1
-        return "$status"
+        _run_sandbox_shell "$key" "$quiet"
     else
         echo "Run: EMA_TARGET=sandbox ema mdb $instance"
     fi
