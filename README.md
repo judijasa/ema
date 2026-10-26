@@ -135,6 +135,49 @@ package via `$db['binlog_expire_days']` (default 7 days). Without `binlog` the
 primary stays binlog-free, and a replica build needs the one-time hand edit
 first (see `doc/system/replica-bootstrap.md`).
 
+## Revisions (`rev/`)
+
+A revision is an **imperative, one-shot** migration that mutates an
+already-materialized database: `rev/<date>-<name>-R0<GUID>/` holding a
+`default.php` (returning a typed `RevisionConfig`) and an `upgrade.sql` of
+migration statements (`ALTER TABLE …`, `UPDATE …`). It is the data-preserving
+path — a schema package's `upgrade.sql` is idempotent target-state
+(`CREATE OR REPLACE`), and `ema create` rebuilds from scratch, so neither
+migrates a live database without dropping data.
+
+A revision is registered by wiring it into the migrated schema package: that
+package's `default.php` `dependencies` holds the revision **head** (the newest
+revision of that package), and each revision's own `dependencies` chains the
+immediately prior revision. Ordering is by `dependencies`, never by the date in
+the folder name (the `<date>` is a human label only).
+
+`ema revision pkg/<name>-<GUID>` scaffolds `rev/<date>-<name>-R0<GUID>/`
+(an empty `upgrade.sql` plus a `default.php` returning `RevisionConfig`), chains
+it to the package's current head, and rewires the package's `default.php` to
+point at the new head (the prior head is removed). The `R0<GUID>` is a fresh
+GUID, not the migrated package's `S0<GUID>`.
+
+`ema upgrade srv/<name>-<GUID>` (existing database) applies **pending revisions
+only**, in dependency order, each exactly once. It creates the tracking table
+`ema_revision` idempotently (the `ema_` prefix is reserved), topo-sorts the
+revisions reachable from the target's schema graph, runs each unrecorded
+revision's `upgrade.sql`, and inserts a tracking row keyed by its GUID. Schema
+packages are not re-run. `ema create` stays schema-only (a fresh database
+materializes the final structure from the idempotent `CREATE OR REPLACE`;
+revisions would fail on tables that do not exist yet).
+
+```sql
+CREATE TABLE IF NOT EXISTS ema_revision (
+    guid       VARCHAR(16)  NOT NULL,
+    name       VARCHAR(255) NOT NULL,
+    applied_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (guid)
+);
+```
+
+`rev/` is local-only, like `srv/` — consumer-owned data, never shipped through
+Composer.
+
 ## Command reference
 
 Shell and database lifecycle (each sandbox owns its instance under `var/sandbox/`):
@@ -158,6 +201,8 @@ Schema packages:
 | `ema database <name>` | Create an `srv/<name>-<GUID>/` package (default definition) |
 | `ema inspect <root-pkg>` | Show the schema dependency graph (wrapper over `src/sort_schemas.php`) |
 | `ema deps <root-pkg>` | List schema packages in topological order |
+| `ema revision pkg/<name>-<GUID>` | Scaffold a one-shot revision in `rev/` and rewire the package's revision head |
+| `ema upgrade srv/<name>-<GUID>` | Apply pending revisions to an existing database, once each (tracked) |
 
 Every command supports `--help`. Flags share one parser with `EMA_*` env
 fallbacks: `-f/--force` (`EMA_FORCE`), `-q/--quiet` (`EMA_QUIET`),
@@ -191,8 +236,10 @@ On success it prints the `[<instance>]` section values (`SERVER`/`PORT`/
 `MYSQL_UNIX_PORT`/`DBNAME`) to record in reuter.ini (see `ema values
 <instance>`). `ema create -n`/`--dry-run` prints the SQL that would
 run (bootstrap + dependency graph in topological order) without provisioning
-or running it. There is no upgrade/reapply surface by design: change a
-database with imperative SQL or delete + recreate.
+or running it. The data-preserving path is `ema upgrade
+srv/<name>-<GUID>`, which applies pending `rev/` revisions to an existing
+database (see Revisions); a schema change itself still means delete +
+recreate, since schema packages are create-only.
 
 Destructive operations are deliberately narrow — ema destroys sandbox
 instances and nothing else:

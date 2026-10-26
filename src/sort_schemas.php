@@ -5,6 +5,7 @@
 require_once __DIR__ . '/Config/RolesConfig.php';
 require_once __DIR__ . '/Config/DatabaseConfig.php';
 require_once __DIR__ . '/Config/PackageConfig.php';
+require_once __DIR__ . '/Config/RevisionConfig.php';
 
 // Topological sort to build schema packages in dependency order.
 class Graph {
@@ -172,10 +173,16 @@ function build_dependency_graph_roots($root_schemas) {
         }
         $dependencies = extract_dependencies($current_schema);
         foreach ($dependencies as $dependency) {
-            $graph->add_edge($current_schema, $dependency);
-            if (find_package($dependency) !== null) {
-                $stack->push($dependency);
+            // A dependency that is not a schema package (a revision ref, which
+            // registers the migrated package's head revision) is not part of
+            // the schema graph: skip it so it cannot surface as a spurious
+            // leaf in the schema topo sort. Revisions are applied by
+            // 'ema upgrade', never by the schema build.
+            if (find_package($dependency) === null) {
+                continue;
             }
+            $graph->add_edge($current_schema, $dependency);
+            $stack->push($dependency);
         }
     }
 
@@ -185,6 +192,105 @@ function build_dependency_graph_roots($root_schemas) {
 // build_dependency_graph(): single-root convenience wrapper.
 function build_dependency_graph($root_schema) {
     return build_dependency_graph_roots(array($root_schema));
+}
+
+// find_revision_package(): locate a rev/<date>-<name>-R0<GUID>/ revision
+// package under the consumer's own rev/ directory, or return null. Revisions
+// are the consumer's own data (imperative, one-shot migrations) — local-only,
+// like srv/, never shipped via Composer.
+function find_revision_package($target) {
+    $dir = 'rev/' . $target;
+    return is_dir($dir) ? realpath($dir) : null;
+}
+
+// revision_definition(): load rev/<date>-<name>-R0<GUID>/default.php (a
+// returned RevisionConfig) and return its directory, full dir name, guid
+// (the trailing -R0<GUID>), and prior-revision dependencies.
+function revision_definition($target) {
+    $dir = find_revision_package($target);
+    if ($dir === null) {
+        fwrite(STDERR, "Error: revision '$target' not found under rev/\n");
+        exit(1);
+    }
+    try {
+        $config = require $dir . '/default.php';
+    } catch (\Throwable $e) {
+        fwrite(STDERR, "Error: rev/$target/default.php: {$e->getMessage()}\n");
+        exit(1);
+    }
+    if (!$config instanceof \Ema\Config\RevisionConfig) {
+        fwrite(STDERR, "Error: rev/$target/default.php must return an \\Ema\\Config\\RevisionConfig\n");
+        exit(1);
+    }
+    return array(
+        'dir' => $dir,
+        'name' => $target,
+        'guid' => substr($target, -16),
+        'dependencies' => $config->dependencies,
+    );
+}
+
+// revision_dependencies(): the immediately prior revisions a revision must run
+// after (chained full <name>-R0<GUID> refs from its RevisionConfig).
+function revision_dependencies($target) {
+    $definition = revision_definition($target);
+    return $definition['dependencies'];
+}
+
+// build_revision_graph_roots(): discover every revision reachable from one or
+// more root schema packages (revision refs in package `dependencies`) and
+// topo-sort them over each revision's own prior-revision `dependencies`. The
+// schema walk collects revision refs; the revision walk then chains each one
+// to the prior revision it lists.
+function build_revision_graph_roots($root_schemas) {
+    $graph = new Graph();
+    $visited_schemas = array();
+    $visited_revisions = array();
+    $revision_stack = new SplStack();
+
+    // 1. Walk the schema dependency graph to collect revision refs.
+    $schema_stack = new SplStack();
+    foreach ($root_schemas as $root_schema) {
+        $schema_stack->push($root_schema);
+    }
+    while (!$schema_stack->isEmpty()) {
+        $schema = $schema_stack->pop();
+        if (isset($visited_schemas[$schema])) {
+            continue;
+        }
+        $visited_schemas[$schema] = true;
+        foreach (extract_dependencies($schema) as $dependency) {
+            if (find_package($dependency) !== null) {
+                $schema_stack->push($dependency);
+            } elseif (find_revision_package($dependency) !== null) {
+                $revision_stack->push($dependency);
+            }
+        }
+    }
+
+    // 2. Walk each discovered revision's own dependencies (prior revisions),
+    //    registering every node so the topo sort covers the whole chain.
+    while (!$revision_stack->isEmpty()) {
+        $revision = $revision_stack->pop();
+        if (isset($visited_revisions[$revision])) {
+            continue;
+        }
+        $visited_revisions[$revision] = true;
+        if (!isset($graph->adjacency_list[$revision])) {
+            $graph->adjacency_list[$revision] = array();
+        }
+        foreach (revision_dependencies($revision) as $dependency) {
+            $graph->add_edge($revision, $dependency);
+            $revision_stack->push($dependency);
+        }
+    }
+
+    return $graph;
+}
+
+// build_revision_graph(): single-root convenience wrapper.
+function build_revision_graph($root_schema) {
+    return build_revision_graph_roots(array($root_schema));
 }
 
 if (!count(debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS))) {

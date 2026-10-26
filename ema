@@ -34,6 +34,8 @@ Schema packages:
   database <name>             Create srv/<name>-<GUID>/ package (default definition)
   inspect <root-pkg>          Show the schema dependency graph
   deps <root-pkg>             List schema packages in topological order
+  revision pkg/<name>-<GUID>  Scaffold a new revision package in rev/
+  upgrade srv/<name>-<GUID>   Apply pending revisions to an existing database
 
 Options:
   -h, --help             Show this help message and exit
@@ -648,7 +650,8 @@ _cmd_mariadb() {
 
 # <prefix> + 14 random base36 chars -- schematic's type-prefixed GUID
 # convention (16 chars total). The prefix maps a package to its kind: S0 for
-# schema packages (pkg/), D0 for database packages (srv/).
+# schema packages (pkg/), D0 for database packages (srv/), R0 for revision
+# packages (rev/).
 _gen_guid() {
     local prefix="$1"
     local suffix
@@ -2158,6 +2161,285 @@ _cmd_deps() {
     "
 }
 
+# --- revisions (rev/) ---------------------------------------------------------
+
+# Resolve a revision package dir via sort_schemas.php's find_revision_package().
+# Prints the dir (or nothing, returning 1) — local rev/ only, like srv/.
+_find_revision_package() {
+    local target="$1"
+    php -r "
+        require '${_EMA_LIB}/sort_schemas.php';
+        \$dir = find_revision_package('${target}');
+        if (\$dir !== null) { echo \$dir; exit(0); }
+        exit(1);
+    "
+}
+
+# Topo-sort the revisions reachable from a JSON array of root schema packages
+# (revision refs in package `dependencies`), one full dir name per line.
+_revisions_for() {
+    local roots_json="$1"
+    php -r "
+        require '${_EMA_LIB}/sort_schemas.php';
+        \$graph = build_revision_graph_roots(json_decode('${roots_json}', true));
+        echo implode(PHP_EOL, \$graph->topological_sort());
+    "
+}
+
+# Rewire a schema package's default.php so its `dependencies` references the new
+# revision head: replace the prior head with the new one, or insert the head
+# when none is registered yet (the package's first revision).
+_revision_wire() {
+    local file="$1" old_head="$2" new_head="$3"
+    FILE="$file" OLD_HEAD="$old_head" NEW_HEAD="$new_head" php <<'PHP' || exit 1
+<?php
+$file = getenv('FILE');
+$old_head = getenv('OLD_HEAD');
+$new_head = getenv('NEW_HEAD');
+$content = file_get_contents($file);
+if ($content === false) {
+    fwrite(STDERR, "Error: cannot read $file\n");
+    exit(1);
+}
+$replaced = false;
+if ($old_head !== '') {
+    // Replace the prior head with the new one. GUIDs are unique, so matching
+    // the quoted dir name is unambiguous.
+    $content = str_replace("'$old_head'", "'$new_head'", $content, $count);
+    $replaced = $count > 0;
+} elseif (preg_match('/dependencies\s*:\s*\[(.*?)\]/s', $content, $m, PREG_OFFSET_CAPTURE)) {
+    // First revision, but the package already lists schema dependencies:
+    // append the head to that list.
+    $inner = rtrim($m[1][0]);
+    $inner = preg_replace('/,\s*$/', '', $inner);
+    $inner = ($inner === '') ? "'$new_head'" : "$inner, '$new_head'";
+    $content = substr_replace($content, "dependencies: [$inner]", $m[0][1], strlen($m[0][0]));
+    $replaced = true;
+} else {
+    // First revision, no dependencies argument: add one right after the
+    // PackageConfig constructor's opening paren.
+    if (preg_match('/PackageConfig\s*\(/s', $content, $m, PREG_OFFSET_CAPTURE)) {
+        $insert_at = $m[0][1] + strlen($m[0][0]);
+        $content = substr_replace($content, "\n    dependencies: ['$new_head'],\n", $insert_at, 0);
+        $replaced = true;
+    }
+}
+if (!$replaced) {
+    fwrite(STDERR, "Error: could not rewire $file (unexpected default.php shape)\n");
+    exit(1);
+}
+if (file_put_contents($file, $content) === false) {
+    fwrite(STDERR, "Error: cannot write $file\n");
+    exit(1);
+}
+PHP
+}
+
+_help_revision() {
+    cat <<'HELP'
+Usage: ema revision pkg/<name>-<GUID>
+
+Scaffold a one-shot revision for a local schema package: create
+rev/<date>-<name>-R0<GUID>/ (default.php + empty upgrade.sql), chain it to the
+package's current revision head, and rewire the package's default.php
+dependencies to point at the new head (the prior head is removed). Revisions
+are applied exactly once per database by 'ema upgrade srv/<name>-<GUID>'.
+HELP
+}
+
+_cmd_revision() {
+    if _is_help "$@"; then
+        _help_revision
+        return
+    fi
+    local target="${1:-}"
+    if [[ -z "$target" ]]; then
+        echo "Error: must provide a schema package (e.g., ema revision pkg/<name>-<GUID>)" >&2
+        _help_revision
+        exit 1
+    fi
+    _assert_repo_root
+    if [[ "$target" != pkg/* ]]; then
+        echo "Error: target must be pkg/<name>-<GUID> (got '$target')" >&2
+        _help_revision
+        exit 1
+    fi
+    local ref name guid date rev_dir pkg_dir head
+    ref="${target#pkg/}"
+    ref="${ref%/}"
+    pkg_dir="$(_find_package "$ref")" || {
+        echo "Error: schema package '$ref' not found" >&2
+        exit 1
+    }
+    local pkg_root
+    pkg_root="$(realpath pkg)"
+    if [[ "$pkg_dir" != "$pkg_root"/* ]]; then
+        echo "Error: '$ref' is not a local pkg/ package — only local schemas can be revised" >&2
+        exit 1
+    fi
+    name="$(_instance_name "$ref")"
+    guid="$(_gen_guid R0)"
+    date="$(date +%F)"
+    rev_dir="rev/${date}-${name}-${guid}"
+    if [[ -e "$rev_dir" ]]; then
+        echo "Error: revision '$rev_dir' already exists" >&2
+        exit 1
+    fi
+    head="$(php -r "
+        require '${_EMA_LIB}/sort_schemas.php';
+        foreach (extract_dependencies('${ref}') as \$dep) {
+            if (find_revision_package(\$dep) !== null) { echo \$dep; exit(0); }
+        }
+        exit(0);
+    ")"
+    mkdir -p "$rev_dir"
+    if [[ -z "$head" ]]; then
+        cat > "$rev_dir/default.php" <<EOD
+<?php
+return new \\Ema\\Config\\RevisionConfig();
+EOD
+    else
+        cat > "$rev_dir/default.php" <<EOD
+<?php
+return new \\Ema\\Config\\RevisionConfig(
+    dependencies: ['${head}'],
+);
+EOD
+    fi
+    touch "$rev_dir/upgrade.sql"
+    _revision_wire "$pkg_dir/default.php" "$head" "${date}-${name}-${guid}"
+    echo "Created $rev_dir"
+}
+
+# Run a single SQL statement (SELECT or DML) as root against <dbname> and print
+# its result set, one value per line. Mirrors _run_root_sql's root/sudo split;
+# callers resolve _MARIADB_ARGS first (socket for local, TCP off-host).
+_run_root_eval() {
+    local dbname="$1" sql="$2"
+    local args=(-N -u root "${_MARIADB_ARGS[@]}" "$dbname" -e "$sql")
+    local out
+    out=$("$DBMS" "${args[@]}" 2>/dev/null) || \
+        out=$(sudo env PATH="$PATH" MYSQL_UNIX_PORT="${MYSQL_UNIX_PORT:-}" "$DBMS" "${args[@]}")
+    printf '%s\n' "$out"
+}
+
+# Apply already-topo-sorted revisions to <dbname>, once each, tracked in
+# ema_revision. Connection-agnostic: uses the resolved _MARIADB_ARGS (sandbox
+# socket or prod socket/TCP) plus the root/sudo fallback. Prints "Applied <rev>"
+# per newly applied revision; skipped (already-tracked) revisions are silent
+# unless _VERBOSE=yes.
+_apply_revisions() {
+    local dbname="$1"; shift
+    local workdir applied_guids rev rev_guid rev_dir
+    workdir=$(mktemp -d /tmp/ema_upgrade_XXXXXX)
+    cat > "$workdir/tracking.sql" <<'SQL'
+CREATE TABLE IF NOT EXISTS ema_revision (
+    guid       VARCHAR(16)  NOT NULL,
+    name       VARCHAR(255) NOT NULL,
+    applied_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (guid)
+);
+SQL
+    _run_root_sql "$dbname" "$workdir/tracking.sql"
+    applied_guids="$(_run_root_eval "$dbname" "SELECT guid FROM ema_revision;")"
+    for rev in "$@"; do
+        [[ -z "$rev" ]] && continue
+        rev_guid="${rev: -16}"
+        if grep -qx "$rev_guid" <<<"$applied_guids"; then
+            [[ "${_VERBOSE:-no}" == "yes" ]] && echo "skip $rev (already applied)" >&2
+            continue
+        fi
+        rev_dir="$(_find_revision_package "$rev")" || {
+            echo "Error: revision '$rev' not found under rev/" >&2
+            rm -r "$workdir"
+            return 1
+        }
+        [[ "${_VERBOSE:-no}" == "yes" ]] && echo "apply $rev" >&2
+        _run_root_sql "$dbname" "$rev_dir/upgrade.sql"
+        _run_root_eval "$dbname" "INSERT INTO ema_revision (guid, name) VALUES ('$rev_guid', '$rev');"
+        echo "Applied $rev"
+    done
+    rm -r "$workdir"
+}
+
+_help_upgrade() {
+    cat <<'HELP'
+Usage: ema upgrade srv/<name>-<GUID> [-q] [-v]
+
+Apply pending revisions to an existing database, once each, in dependency
+order. Discovers the revisions reachable from the target srv/ schema graph
+(revision refs in package `dependencies`), topo-sorts them over each revision's
+own prior-revision `dependencies`, then for every revision whose guid is not yet
+recorded in ema_revision runs its upgrade.sql and inserts a tracking row.
+Schema packages are NOT applied. The prod instance (and its database) must
+already exist — run 'ema create srv/<name>-<GUID>' first.
+HELP
+}
+
+_cmd_upgrade() {
+    if _is_help "$@"; then
+        _help_upgrade
+        return
+    fi
+    _parse_flags "-q --quiet -v --verbose" "" "$@"
+    local target="${_POS_ARGS[0]:-}"
+    local quiet verbose
+    quiet=$(_get_flag --quiet -q quiet)
+    verbose=$(_get_flag --verbose -v verbose)
+    if [[ -z "$target" ]]; then
+        echo "Error: must provide a target (e.g., ema upgrade srv/<name>-<GUID>)" >&2
+        _help_upgrade
+        exit 1
+    fi
+    _assert_repo_root
+    if [[ "$target" != srv/* ]]; then
+        echo "Error: target must be srv/<name>-<GUID> (got '$target')" >&2
+        _help_upgrade
+        exit 1
+    fi
+    local ref defs dbname instance deps_json
+    local -a revisions=()
+    ref="${target#srv/}"
+    ref="${ref%/}"
+    defs="$(_srv_definition "$ref")" || exit 1
+    instance="$(_instance_name "$ref")"
+    dbname=$(echo "$defs" | jq -r '.db.dbname')
+    if [[ -z "$dbname" || "$dbname" == "null" ]]; then
+        echo "Error: srv/$ref/default.php has no dbname" >&2
+        exit 1
+    fi
+    deps_json=$(echo "$defs" | jq -c '.dependencies')
+    mapfile -t revisions < <(_revisions_for "$deps_json")
+    if [[ ${#revisions[@]} -eq 0 ]]; then
+        [[ "$quiet" == "no" ]] && echo "No pending revisions."
+        return
+    fi
+    # ema upgrade never provisions: the prod instance and database must exist.
+    local conffile
+    conffile="$(_prod_conf_file "$instance")"
+    if [[ ! -f "$conffile" ]]; then
+        echo "Error: no prod instance for '$instance' ($conffile missing) — run 'ema create srv/$ref' first" >&2
+        exit 1
+    fi
+    _prod_instance_ensure "$instance" "$quiet"
+    MYSQL_UNIX_PORT="$_PROD_SOCKET"
+    _mariadb_args
+    if ! _prod_database_exists "$dbname"; then
+        echo "Error: database '$dbname' does not exist on instance '$instance' — run 'ema create srv/$ref' first" >&2
+        exit 1
+    fi
+    _VERBOSE="$verbose"
+    _apply_revisions "$dbname" "${revisions[@]}"
+    [[ "$quiet" == "no" ]] && echo "Upgrade complete for $dbname."
+}
+
+# Testability hook: when sourced with EMA_SOURCE_ONLY=1, define all functions
+# above and stop (skip the dispatch) so tests can drive helpers (e.g.
+# _apply_revisions) against a sandbox without the prod-only CLI verbs.
+if [[ "${EMA_SOURCE_ONLY:-}" == "1" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 if [[ $# -eq 0 ]]; then
     show_help
     exit 0
@@ -2215,6 +2497,14 @@ case "$1" in
     deps)
         shift
         _cmd_deps "$@"
+        ;;
+    revision)
+        shift
+        _cmd_revision "$@"
+        ;;
+    upgrade)
+        shift
+        _cmd_upgrade "$@"
         ;;
     -h|--help|help)
         show_help
