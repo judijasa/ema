@@ -1,0 +1,58 @@
+<?php
+
+/**
+ * PHPStan stub for src/sort_schemas.php.
+ *
+ * sort_schemas.php is the legacy domain core: global, untyped functions plus a
+ * Graph class. It is intentionally kept out of the PHPStan analysis paths
+ * (level max would flag its untyped internals), but the typed Cli commands call
+ * its symbols directly. This stub declares those signatures so the callers
+ * check cleanly, without touching the legacy file's runtime behavior.
+ */
+
+class Graph
+{
+    /** @var array<string, list<string>> */
+    public $adjacency_list;
+
+    /** @return list<string> */
+    public function topological_sort(): array {}
+}
+
+/** @return string|null */
+function find_package(string $schema): ?string {}
+
+/** @return list<string> */
+function extract_dependencies(string $schema): array {}
+
+/** @return string|null */
+function find_revision_package(string $target): ?string {}
+
+function build_dependency_graph(string $root_schema): Graph {}
+
+/** @param list<string> $root_schemas */
+function build_dependency_graph_roots(array $root_schemas): Graph {}
+
+/** @param list<string> $root_schemas */
+function build_revision_graph_roots(array $root_schemas): Graph {}
+
+/** @return string|null */
+function find_srv_package(string $target): ?string {}
+
+/**
+ * @return array{
+ *   dir: string,
+ *   db: array{
+ *     dbname: string,
+ *     charset: string,
+ *     collation: string,
+ *     type: string,
+ *     replica_of: string|null,
+ *     binlog: bool,
+ *     binlog_expire_days: int|null,
+ *     replica_ssl_verify_server_cert: bool,
+ *   },
+ *   dependencies: list<string>,
+ * }
+ */
+function srv_definition(string $target): array {}
