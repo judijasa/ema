@@ -152,10 +152,12 @@ immediately prior revision. Ordering is by `dependencies`, never by the date in
 the folder name (the `<date>` is a human label only).
 
 `ema revision pkg/<name>-<GUID>` scaffolds `rev/<date>-<name>-R0<GUID>/`
-(an empty `upgrade.sql` plus a `default.php` returning `RevisionConfig`), chains
-it to the package's current head, and rewires the package's `default.php` to
-point at the new head (the prior head is removed). The `R0<GUID>` is a fresh
-GUID, not the migrated package's `S0<GUID>`.
+(a `default.php` returning `RevisionConfig` plus an `upgrade.sql`), chains it to
+the package's current head, and rewires the package's `default.php` to point at
+the new head (the prior head is removed). The package's first revision copies
+its `upgrade.sql` verbatim (creating its tables); later revisions start with an
+empty `upgrade.sql` for the alteration. The `R0<GUID>` is a fresh GUID, not the
+migrated package's `S0<GUID>`.
 
 `ema upgrade srv/<name>-<GUID>` (existing database) applies **pending revisions
 only**, in dependency order, each exactly once. It creates the tracking table

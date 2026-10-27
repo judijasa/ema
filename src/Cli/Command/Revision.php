@@ -24,10 +24,13 @@ final class Revision extends AbstractCommand
 Usage: ema revision pkg/<name>-<GUID>
 
 Scaffold a one-shot revision for a local schema package: create
-rev/<date>-<name>-R0<GUID>/ (default.php + empty upgrade.sql), chain it to the
+rev/<date>-<name>-R0<GUID>/ (default.php + upgrade.sql), chain it to the
 package's current revision head, and rewire the package's default.php
-dependencies to point at the new head (the prior head is removed). Revisions
-are applied exactly once per database by 'ema upgrade srv/<name>-<GUID>'.
+dependencies to point at the new head (the prior head is removed). The
+package's first revision copies its upgrade.sql verbatim (creating the
+tables); later revisions start with an empty upgrade.sql for the alteration.
+Revisions are applied exactly once per database by 'ema upgrade
+srv/<name>-<GUID>'.
 TXT;
     }
 
@@ -84,7 +87,21 @@ TXT;
             $default = "<?php\nreturn new \\Ema\\Config\\RevisionConfig(\n    dependencies: ['$head'],\n);\n";
         }
         file_put_contents("$revDir/default.php", $default);
-        touch("$revDir/upgrade.sql");
+
+        // First revision bootstraps from the schema package's declarative DDL
+        // (verbatim copy, mirroring `scm revision`); later revisions start with
+        // an empty upgrade.sql for the operator's alteration.
+        if ($head === '' && is_file("$pkgDir/upgrade.sql")) {
+            $sql = file_get_contents("$pkgDir/upgrade.sql");
+            if ($sql === false) {
+                throw new Error("cannot read $pkgDir/upgrade.sql");
+            }
+        } else {
+            $sql = '';
+        }
+        if (file_put_contents("$revDir/upgrade.sql", $sql) === false) {
+            throw new Error("cannot write $revDir/upgrade.sql");
+        }
 
         $this->rewire("$pkgDir/default.php", $head, "$date-$name-$guid");
 

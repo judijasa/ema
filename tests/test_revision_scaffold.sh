@@ -14,7 +14,9 @@ cat > "$FIXTURE/pkg/items-2A3B4C5D6E7F8091/default.php" <<'PHP'
 <?php
 return new \Ema\Config\PackageConfig();
 PHP
-touch "$FIXTURE/pkg/items-2A3B4C5D6E7F8091/upgrade.sql"
+cat > "$FIXTURE/pkg/items-2A3B4C5D6E7F8091/upgrade.sql" <<'SQL'
+CREATE TABLE IF NOT EXISTS items_table (id INT);
+SQL
 cat > "$FIXTURE/srv/test-D01B9X95PUIWQ60Q/default.php" <<'PHP'
 <?php
 return new \Ema\Config\DatabaseConfig(
@@ -40,6 +42,11 @@ return new \Ema\Config\RevisionConfig();
 EOF
 php -l "$FIXTURE/rev/$rev1/default.php" >/dev/null || fail "rev1 default.php is not valid PHP"
 
+# First revision copies the schema package's upgrade.sql verbatim.
+diff -u - "$FIXTURE/rev/$rev1/upgrade.sql" <<'SQL' || fail "rev1 upgrade.sql not copied from schema"
+CREATE TABLE IF NOT EXISTS items_table (id INT);
+SQL
+
 # Package references only the new head.
 grep -Fq "dependencies: ['$rev1']" pkg/items-2A3B4C5D6E7F8091/default.php \
     || fail "package does not reference head '$rev1'"
@@ -59,6 +66,9 @@ grep -Fq "'$rev1'" pkg/items-2A3B4C5D6E7F8091/default.php \
 # rev2 chains to rev1 (immediately-prior revision dependency).
 grep -Fq "dependencies: ['$rev1']" "rev/$rev2/default.php" \
     || fail "rev2 does not chain to rev1"
+
+# Later revisions start empty (the operator writes the alteration).
+[[ ! -s "$FIXTURE/rev/$rev2/upgrade.sql" ]] || fail "rev2 upgrade.sql should be empty"
 
 # --- topo order (dependencies, not date) -------------------------------------
 order="$(php -r "

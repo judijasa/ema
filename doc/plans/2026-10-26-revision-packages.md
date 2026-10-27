@@ -88,7 +88,7 @@ Order: rev1 → rev2 (transitive via the head).
 
 | command | behavior |
 |---|---|
-| `ema revision pkg/<name>-S0<GUID>` | validate the package exists, scaffold `rev/<date>-<name>-R0<GUID>/` with `default.php` + empty `upgrade.sql`, chain it to the current head, and replace the package's prior revision ref with the new head in `default.php` |
+| `ema revision pkg/<name>-S0<GUID>` | validate the package exists, scaffold `rev/<date>-<name>-R0<GUID>/` with `default.php` + `upgrade.sql` (the first revision copies the schema's `upgrade.sql` verbatim; later ones start empty), chain it to the current head, and replace the package's prior revision ref with the new head in `default.php` |
 | `ema create …` (fresh) | schemas only; revisions are not applied |
 | `ema upgrade …` (existing) | pending revisions only, in topo order, each once (tracked) |
 | `ema mariadb <db> < file.sql` | unchanged — raw SQL remains the ad-hoc path |
